@@ -15,6 +15,10 @@ while they are deafened.
 
 Settings: maximum length, sounds per user, and the cooldown between plays.
 
+# Screenshot
+
+![Soundboard Screenshot](https://i.imgur.com/39afLWU.png)
+
 ## Development
 
 ```bash
