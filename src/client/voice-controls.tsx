@@ -15,7 +15,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@sharkord/ui";
-import { AudioLines, Heart, Plus } from "lucide-react";
+import { AudioLines, Heart, PictureInPicture2, Plus } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import type { TSharkord, TSound } from "../contract";
 import {
@@ -28,6 +28,12 @@ import {
 } from "./store";
 import { ErrorText, MutedText, Row, Stack } from "./ui";
 import { playSound } from "./audio";
+import {
+  DetachedWindow,
+  openDetachedWindow,
+  useDetachedWindowLifecycle,
+} from "./detached-window";
+import { clearPlaying, setPlaying } from "./player-badge";
 import { UploadForm } from "./upload-form";
 import { VolumeControl } from "./volume-control";
 
@@ -126,10 +132,14 @@ const SoundCard = memo(
 
 type TSoundPickerProps = {
   userData: TUserDataState;
+  /** caps the grid inside the popover; a detached window scrolls instead */
+  gridMaxHeight?: number;
   onAdd?: () => void;
+  onDetach?: () => void;
 };
 
-const SoundPicker = memo(({ userData, onAdd }: TSoundPickerProps) => {
+const SoundPicker = memo((props: TSoundPickerProps) => {
+  const { userData, gridMaxHeight, onAdd, onDetach } = props;
   const { data, save } = userData;
   const { sounds } = useSoundboard();
   const { isCoolingDown, startCooldown } = useCooldown();
@@ -177,6 +187,14 @@ const SoundPicker = memo(({ userData, onAdd }: TSoundPickerProps) => {
         {onAdd && (
           <IconButton icon={Plus} title="Add a sound" onClick={onAdd} />
         )}
+        {onDetach && (
+          <IconButton
+            icon={PictureInPicture2}
+            title="Open in a separate window"
+            // the picker shows it when the browser refuses the window
+            onClick={() => run(async () => onDetach())}
+          />
+        )}
       </Row>
 
       <div
@@ -184,7 +202,7 @@ const SoundPicker = memo(({ userData, onAdd }: TSoundPickerProps) => {
           display: "grid",
           gridTemplateColumns: `repeat(${GRID_COLUMNS}, minmax(0, 1fr))`,
           gap: 6,
-          maxHeight: 300,
+          maxHeight: gridMaxHeight,
           overflowY: "auto",
         }}
       >
@@ -228,11 +246,20 @@ const VoiceControls = memo(({ channelId }: { channelId: number }) => {
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   // lives outside the popover, which unmounts its content when it closes
   const [isUploadOpen, setIsUploadOpen] = useState(false);
+  // rendered here too, so leaving voice closes the window with the rest
+  const [detachedWindow, setDetachedWindow] = useState<Window>();
 
   // mounted for as long as the user is in voice, so this hears every sound
   // played in their channel, whether the popover is open or not
   usePush<TSharkord>(async (push) => {
-    if (push.type !== "play" || deafened) return;
+    if (push.type !== "play") return;
+
+    // shown even while deafened: it says who played, not what you hear
+    if (push.showBadge) {
+      setPlaying(push.userId, push.soundName, push.durationMs);
+    }
+
+    if (deafened) return;
 
     const source = await playSound(push.soundId, playbackOptions).catch(
       () => undefined,
@@ -250,6 +277,7 @@ const VoiceControls = memo(({ channelId }: { channelId: number }) => {
     () => () => {
       channelSources.forEach((source) => source.stop());
       channelSources.clear();
+      clearPlaying();
     },
     [channelId],
   );
@@ -257,6 +285,15 @@ const VoiceControls = memo(({ channelId }: { channelId: number }) => {
   const openUpload = () => {
     setIsPickerOpen(false);
     setIsUploadOpen(true);
+  };
+
+  useDetachedWindowLifecycle(detachedWindow, () =>
+    setDetachedWindow(undefined),
+  );
+
+  const detach = () => {
+    setDetachedWindow(openDetachedWindow(420, 560));
+    setIsPickerOpen(false);
   };
 
   return (
@@ -275,10 +312,18 @@ const VoiceControls = memo(({ channelId }: { channelId: number }) => {
         <PopoverContent side="top" align="start" style={{ width: 360 }}>
           <SoundPicker
             userData={userData}
+            gridMaxHeight={300}
             onAdd={canUpload ? openUpload : undefined}
+            onDetach={detachedWindow ? undefined : detach}
           />
         </PopoverContent>
       </Popover>
+
+      {detachedWindow && (
+        <DetachedWindow popup={detachedWindow} title="Soundboard">
+          <SoundPicker userData={userData} />
+        </DetachedWindow>
+      )}
 
       <Dialog open={isUploadOpen} onOpenChange={setIsUploadOpen}>
         <DialogContent close={() => setIsUploadOpen(false)}>

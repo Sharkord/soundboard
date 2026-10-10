@@ -7,6 +7,10 @@ import { MAX_NAME_LENGTH, type TSharkord, type TSound } from "../contract";
 import { getErrorMessage } from "../helpers";
 import { getOggOpusDurationMs } from "../ogg";
 
+// a shortcode, not the 🔊 character: the client draws a reaction by looking
+// its name up, and a raw character finds nothing and renders broken
+const PLAYER_REACTION_EMOJI = "loud_sound";
+
 const sendJson = (res: ServerResponse, status: number, body: unknown) => {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
@@ -64,6 +68,20 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
       type: "number",
       defaultValue: 0,
     },
+    {
+      key: "playerIndicator",
+      name: "Show who played a sound",
+      description:
+        "How the voice channel sees who played a sound: a badge on their card and sidebar row for as long as it plays, or a floating emoji like a reaction.",
+      type: "enum",
+      defaultValue: "both",
+      options: [
+        { value: "badge", label: "Badge on the player" },
+        { value: "reaction", label: "Floating emoji reaction" },
+        { value: "both", label: "Both" },
+        { value: "off", label: "Don't show" },
+      ],
+    },
   ] as const);
 
   const soundsDir = path.join(ctx.dataPath, "sounds");
@@ -77,8 +95,13 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
   const cooldownUntil = new Map<number, number>();
 
   // admins type these in, so a negative or empty one counts as 0
-  const getLimit = (key: Parameters<typeof settings.get>[0]) =>
-    Math.max(0, settings.get(key) || 0);
+  const getLimit = (
+    key:
+      | "maxDurationSeconds"
+      | "maxFileSizeKb"
+      | "maxSoundsPerUser"
+      | "cooldownSeconds",
+  ) => Math.max(0, settings.get(key) || 0);
 
   const getMaxBytes = () => getLimit("maxFileSizeKb") * 1024;
 
@@ -242,12 +265,27 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
 
       cooldownUntil.set(invoker.userId, now + cooldownMs);
 
+      const indicator = settings.get("playerIndicator");
+      const showReaction = indicator === "reaction" || indicator === "both";
+
       // every client plays it on its own, so nothing streams through voice
       ctx.push.toVoiceChannel(channelId, {
         type: "play",
         soundId,
         userId: invoker.userId,
+        soundName: sound.name,
+        durationMs: sound.durationMs,
+        showBadge: indicator === "badge" || indicator === "both",
       });
+
+      if (showReaction) {
+        // the sound already played, so a reaction that fails is only logged
+        await ctx.voice
+          .react(channelId, invoker.userId, PLAYER_REACTION_EMOJI)
+          .catch((error) =>
+            ctx.logger.error("Could not show who played a sound", error),
+          );
+      }
 
       return { cooldownMs };
     },

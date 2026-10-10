@@ -37,7 +37,15 @@ type TSharkord = {
     };
   };
   push:
-    | { type: "play"; soundId: string; userId: number }
+    | {
+        type: "play";
+        soundId: string;
+        userId: number;
+        soundName: string;
+        durationMs: number;
+        /** mark the player's card and sidebar row while the sound plays */
+        showBadge: boolean;
+      }
     // the list can outgrow a push, so clients fetch it again instead
     | { type: "changed" };
   userData: {
