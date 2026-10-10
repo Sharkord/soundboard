@@ -1,93 +1,284 @@
-import {
-  type PluginContext,
-  type TUpgradeInfo,
-  type UnloadPluginContext,
-  type UpgradePluginContext,
-} from "@sharkord/plugin-sdk";
+import { Permission, type PluginContext } from "@sharkord/plugin-sdk";
+import { randomUUID } from "crypto";
+import fs from "fs/promises";
+import type { IncomingMessage, ServerResponse } from "http";
 import path from "path";
-import type { TPlugin, TRoll } from "../types";
+import { MAX_NAME_LENGTH, type TSharkord, type TSound } from "../contract";
+import { getErrorMessage } from "../helpers";
+import { getOggOpusDurationMs } from "../ogg";
 
-const onLoad = async (ctx: PluginContext<TPlugin>) => {
-  ctx.logger.log("Plugin example loaded");
+const sendJson = (res: ServerResponse, status: number, body: unknown) => {
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(JSON.stringify(body));
+};
 
+const readBody = async (
+  req: IncomingMessage,
+  maxBytes: number,
+): Promise<Uint8Array> => {
+  const chunks: Buffer[] = [];
+  let size = 0;
+
+  for await (const chunk of req as AsyncIterable<Buffer>) {
+    size += chunk.length;
+
+    if (size > maxBytes) {
+      throw new Error("The sound is too large.");
+    }
+
+    chunks.push(chunk);
+  }
+
+  return Buffer.concat(chunks);
+};
+
+const onLoad = async (ctx: PluginContext<TSharkord>) => {
   const settings = await ctx.settings.register([
     {
-      key: "maxSides",
-      name: "Maximum sides",
-      description: "The largest die this plugin will roll.",
+      key: "maxDurationSeconds",
+      name: "Maximum length (seconds)",
+      description: "The longest sound anyone can upload.",
+      type: "number",
+      defaultValue: 10,
+    },
+    {
+      key: "maxFileSizeKb",
+      name: "Maximum file size (KB)",
+      description:
+        "The largest sound anyone can upload. Sounds are stored as mono Opus, about 10KB per second.",
+      type: "number",
+      defaultValue: 256,
+    },
+    {
+      key: "maxSoundsPerUser",
+      name: "Sounds per user",
+      description: "How many sounds each user can upload.",
       type: "number",
       defaultValue: 20,
     },
+    {
+      key: "cooldownSeconds",
+      name: "Cooldown (seconds)",
+      description:
+        "How long a user waits between two sounds. A sound longer than this blocks the next one until it ends, so 0 means only that.",
+      type: "number",
+      defaultValue: 0,
+    },
   ] as const);
 
-  const totalPath = path.join(ctx.dataPath, "total-rolls.txt");
+  const soundsDir = path.join(ctx.dataPath, "sounds");
+  const indexPath = path.join(ctx.dataPath, "sounds.json");
 
-  const readTotal = async () => {
-    try {
-      const file = Bun.file(totalPath);
-      const text = await file.text();
+  await fs.mkdir(soundsDir, { recursive: true });
 
-      return Number(text) || 0;
-    } catch (error) {
-      return 0;
-    }
+  const sounds: TSound[] = await Bun.file(indexPath)
+    .json()
+    .catch(() => []);
+  const cooldownUntil = new Map<number, number>();
+
+  // admins type these in, so a negative or empty one counts as 0
+  const getLimit = (key: Parameters<typeof settings.get>[0]) =>
+    Math.max(0, settings.get(key) || 0);
+
+  const getMaxBytes = () => getLimit("maxFileSizeKb") * 1024;
+
+  const getMaxDurationMs = () => getLimit("maxDurationSeconds") * 1000;
+
+  // ids come from the client, so they are only ever looked up, never joined
+  // into a path: the stored sound's own id is
+  const getSoundPath = (sound: TSound) =>
+    path.join(soundsDir, `${sound.id}.ogg`);
+
+  // whatever no sound points to: left by a crash between writing a file and
+  // saving the index, or by an older version's format
+  const removeOrphanedFiles = async () => {
+    const keep = new Set(sounds.map((sound) => path.basename(getSoundPath(sound))));
+    const files = await fs.readdir(soundsDir);
+
+    await Promise.all(
+      files
+        .filter((file) => !keep.has(file))
+        .map((file) => fs.rm(path.join(soundsDir, file), { force: true })),
+    );
   };
 
-  const roll = async (userId: number, sides: number): Promise<TRoll> => {
-    const max = Math.min(sides, settings.get("maxSides"));
-    const total = (await readTotal()) + 1;
+  await removeOrphanedFiles();
 
-    await Bun.write(totalPath, String(total));
+  const getSound = (soundId: string): TSound => {
+    const sound = sounds.find((s) => s.id === soundId);
 
-    const result = {
-      userId,
-      total,
-      sides: max,
-      value: 1 + Math.floor(Math.random() * max),
-    };
+    if (!sound) throw new Error("That sound no longer exists.");
 
-    // every client of this plugin gets this, through `usePush` on the client
-    ctx.push.toAll(result);
-
-    return result;
+    return sound;
   };
 
-  // makes this plugin's components render. Pass a `{ [slot]: Permission }` map
-  // to only show a slot to users who hold that permission.
+  const saveSounds = async () => {
+    await Bun.write(indexPath, JSON.stringify(sounds));
+
+    ctx.push.toAll({ type: "changed" });
+  };
+
+  const removeSound = async (sound: TSound) => {
+    sounds.splice(sounds.indexOf(sound), 1);
+
+    await saveSounds();
+    await fs.rm(getSoundPath(sound), { force: true });
+  };
+
   ctx.ui.enable();
 
-  ctx.events.on("user:joined", ({ username }) => {
-    ctx.logger.debug(`${username} joined`);
+  ctx.http.post(
+    "/sounds",
+    async (req, res, { userId }) => {
+      if (!userId) return sendJson(res, 401, { error: "Sign in first." });
+
+      const params = new URL(req.url ?? "", "http://localhost").searchParams;
+      const name = params.get("name")?.trim() ?? "";
+      const maxDurationMs = getMaxDurationMs();
+
+      if (!name || name.length > MAX_NAME_LENGTH) {
+        return sendJson(res, 400, {
+          error: `The name must be 1 to ${MAX_NAME_LENGTH} characters.`,
+        });
+      }
+
+      const owned = sounds.filter((s) => s.uploaderId === userId).length;
+
+      if (owned >= getLimit("maxSoundsPerUser")) {
+        return sendJson(res, 400, {
+          error: "You have reached your sound limit. Delete one first.",
+        });
+      }
+
+      let data: Uint8Array;
+      let durationMs: number;
+
+      try {
+        data = await readBody(req, getMaxBytes());
+        durationMs = getOggOpusDurationMs(data);
+      } catch (error) {
+        return sendJson(res, 400, { error: getErrorMessage(error) });
+      }
+
+      // a few ms of slack for rounding in the browser's trim
+      if (durationMs > maxDurationMs + 50) {
+        return sendJson(res, 400, {
+          error: `Sounds can be at most ${(maxDurationMs / 1000).toFixed(1)} seconds long.`,
+        });
+      }
+
+      const sound: TSound = {
+        id: randomUUID(),
+        name,
+        uploaderId: userId,
+        durationMs: Math.round(durationMs),
+        createdAt: Date.now(),
+      };
+
+      await Bun.write(getSoundPath(sound), data);
+
+      sounds.push(sound);
+
+      await saveSounds();
+
+      ctx.logger.log(`User ${userId} uploaded "${name}"`);
+
+      sendJson(res, 201, sound);
+    },
+    { requires: Permission.UPLOAD_FILES },
+  );
+
+  ctx.http.get(
+    "/sounds/*",
+    async (req, res) => {
+      const soundId = new URL(req.url ?? "", "http://localhost").pathname
+        .split("/")
+        .pop();
+      const sound = sounds.find((s) => s.id === soundId);
+
+      if (!sound) return sendJson(res, 404, { error: "Sound not found." });
+
+      res.writeHead(200, {
+        "content-type": "audio/ogg",
+        "x-content-type-options": "nosniff",
+        // an id is never reused, so its file never changes
+        "cache-control": "private, max-age=31536000, immutable",
+      });
+      res.end(await fs.readFile(getSoundPath(sound)));
+    },
+    { auth: true },
+  );
+
+  ctx.actions.register({
+    name: "getSoundboard",
+    executes: async () => ({
+      sounds,
+      maxDurationMs: getMaxDurationMs(),
+      maxBytes: getMaxBytes(),
+    }),
   });
 
-  // typed in chat as `/roll 20`. The name and the shape of `execute` come from
-  ctx.commands.register({
-    name: "roll",
-    description: "Rolls a die.",
-    args: [{ name: "sides", type: "number", required: true }],
-    // requires: Permission.JOIN_VOICE_CHANNELS, // uncomment to require a specific permission to use this command
-    executes: async (invoker, args) => {
-      const { value, sides } = await roll(invoker.userId, args.sides);
+  ctx.actions.register({
+    name: "playSound",
+    executes: async (invoker, { soundId }) => {
+      const channelId = invoker.currentVoiceChannelId;
 
-      return `You rolled ${value} on a d${sides}.`;
+      if (!channelId) throw new Error("Join a voice channel to play sounds.");
+
+      const sound = getSound(soundId);
+      const now = Date.now();
+
+      // the client disables its buttons for the cooldown, so this only
+      // answers a client that ignores it
+      if (now < (cooldownUntil.get(invoker.userId) ?? 0)) {
+        throw new Error("Wait a moment before playing another sound.");
+      }
+
+      // a sound longer than the cooldown blocks the next one until it ends
+      const cooldownMs = Math.max(
+        getLimit("cooldownSeconds") * 1000,
+        sound.durationMs,
+      );
+
+      cooldownUntil.set(invoker.userId, now + cooldownMs);
+
+      // every client plays it on its own, so nothing streams through voice
+      ctx.push.toVoiceChannel(channelId, {
+        type: "play",
+        soundId,
+        userId: invoker.userId,
+      });
+
+      return { cooldownMs };
     },
   });
 
-  // the same thing for your own UI: called from the client, runs here, so it
-  // can reach secrets, the filesystem, and the rest of `ctx`.
   ctx.actions.register({
-    name: "roll",
-    // requires: Permission.JOIN_VOICE_CHANNELS, // uncomment to require a permission to use this action
-    executes: (invoker, payload) => roll(invoker.userId, payload.sides),
+    name: "deleteSound",
+    description: "Deletes a sound the caller uploaded.",
+    executes: async (invoker, { soundId }) => {
+      const sound = getSound(soundId);
+
+      if (sound.uploaderId !== invoker.userId) {
+        throw new Error("You can only delete your own sounds.");
+      }
+
+      await removeSound(sound);
+    },
+  });
+
+  ctx.actions.register({
+    name: "deleteAnySound",
+    description: "Deletes any sound, whoever uploaded it.",
+    requires: Permission.MANAGE_PLUGINS,
+    executes: async (invoker, { soundId }) => {
+      const sound = getSound(soundId);
+
+      await removeSound(sound);
+
+      ctx.logger.log(`User ${invoker.userId} deleted "${sound.name}"`);
+    },
   });
 };
 
-const onUnload = (ctx: UnloadPluginContext) => {
-  ctx.logger.log("Plugin example unloaded");
-};
-
-const onUpgrade = (ctx: UpgradePluginContext, info: TUpgradeInfo) => {
-  ctx.logger.log(`Upgraded from ${info.previousVersion} to ${info.version}`);
-};
-
-export { onLoad, onUnload, onUpgrade };
+export { onLoad };
