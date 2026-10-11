@@ -16,14 +16,13 @@ import {
   PopoverTrigger,
 } from "@sharkord/ui";
 import { AudioLines, Heart, PictureInPicture2, Plus } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TSharkord, TSound } from "../contract";
 import {
   callAction,
   useCanUpload,
   useErrorState,
   usePlaybackOptions,
-  type TUserDataState,
   useSoundboard,
 } from "./store";
 import { ErrorText, MutedText, Row, Stack } from "./ui";
@@ -33,7 +32,7 @@ import {
   openDetachedWindow,
   useDetachedWindowLifecycle,
 } from "./detached-window";
-import { clearPlaying, setPlaying } from "./player-badge";
+import { clearPlaying, setPlaying, useIsSoundPlaying } from "./player-badge";
 import { UploadForm } from "./upload-form";
 import { VolumeControl } from "./volume-control";
 
@@ -43,7 +42,10 @@ const GRID_COLUMNS = 4;
 
 // shared by every picker, so closing and reopening the popover does not
 // re-enable the buttons early
+let cooldownStartedAt = 0;
 let cooldownUntil = 0;
+// the sound the user played, the one card that shows the cooldown
+let cooldownSoundId: string | undefined;
 
 /** Whether the user's last play is still cooling down, as the server counts it. */
 const useCooldown = () => {
@@ -62,13 +64,55 @@ const useCooldown = () => {
     return () => clearTimeout(timeout);
   }, [isCoolingDown]);
 
-  const startCooldown = useCallback((cooldownMs: number) => {
-    cooldownUntil = Date.now() + cooldownMs;
+  const startCooldown = useCallback((soundId: string, cooldownMs: number) => {
+    cooldownSoundId = soundId;
+    cooldownStartedAt = Date.now();
+    cooldownUntil = cooldownStartedAt + cooldownMs;
     setIsCoolingDown(cooldownMs > 0);
   }, []);
 
   return { isCoolingDown, startCooldown };
 };
+
+/** Shrinks away over what is left of the cooldown, from where it is now. */
+const CooldownBar = memo(() => {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const remaining = cooldownUntil - Date.now();
+
+    if (!ref.current || remaining <= 0) return;
+
+    const animation = ref.current.animate(
+      [
+        {
+          transform: `scaleX(${remaining / (cooldownUntil - cooldownStartedAt)})`,
+        },
+        { transform: "scaleX(0)" },
+      ],
+      { duration: remaining, fill: "forwards" },
+    );
+
+    return () => animation.cancel();
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        position: "absolute",
+        left: 6,
+        right: 6,
+        bottom: 4,
+        height: 3,
+        borderRadius: 2,
+        background: "var(--primary)",
+        transformOrigin: "left",
+        pointerEvents: "none",
+      }}
+    />
+  );
+});
 
 type TSoundCardProps = {
   sound: TSound;
@@ -85,53 +129,59 @@ const SoundCard = memo(
     disabled,
     onPlay,
     onToggleFavorite,
-  }: TSoundCardProps) => (
-    <div style={{ position: "relative", aspectRatio: "1 / 1" }}>
-      <Button
-        variant="secondary"
-        title={sound.name}
-        disabled={disabled}
-        style={{
-          width: "100%",
-          height: "100%",
-          padding: 6,
-          whiteSpace: "normal",
-          fontSize: 12,
-          lineHeight: 1.2,
-        }}
-        onClick={() => onPlay(sound.id)}
-      >
-        <span
-          style={{
-            display: "-webkit-box",
-            WebkitLineClamp: 3,
-            WebkitBoxOrient: "vertical",
-            overflow: "hidden",
-            wordBreak: "break-word",
-          }}
-        >
-          {sound.name}
-        </span>
-      </Button>
+  }: TSoundCardProps) => {
+    const isPlaying = useIsSoundPlaying(sound.id);
 
-      <Button
-        variant="ghost"
-        size="icon-xs"
-        title={isFavorite ? "Remove from favorites" : "Add to favorites"}
-        style={{ position: "absolute", top: 4, right: 4 }}
-        onClick={() => onToggleFavorite(sound.id)}
-      >
-        <Heart
-          color={isFavorite ? FAVORITE_COLOR : "var(--muted-foreground)"}
-          fill={isFavorite ? FAVORITE_COLOR : "none"}
-        />
-      </Button>
-    </div>
-  ),
+    return (
+      <div style={{ position: "relative", aspectRatio: "1 / 1" }}>
+        <Button
+          // lit up while it plays in the channel, whoever played it
+          variant={isPlaying ? "default" : "secondary"}
+          title={sound.name}
+          disabled={disabled}
+          style={{
+            width: "100%",
+            height: "100%",
+            padding: 6,
+            whiteSpace: "normal",
+            fontSize: 12,
+            lineHeight: 1.2,
+          }}
+          onClick={() => onPlay(sound.id)}
+        >
+          <span
+            style={{
+              display: "-webkit-box",
+              WebkitLineClamp: 3,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden",
+              wordBreak: "break-word",
+            }}
+          >
+            {sound.name}
+          </span>
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          title={isFavorite ? "Remove from favorites" : "Add to favorites"}
+          style={{ position: "absolute", top: 4, right: 4 }}
+          onClick={() => onToggleFavorite(sound.id)}
+        >
+          <Heart
+            color={isFavorite ? FAVORITE_COLOR : "var(--muted-foreground)"}
+            fill={isFavorite ? FAVORITE_COLOR : "none"}
+          />
+        </Button>
+
+        {disabled && sound.id === cooldownSoundId && <CooldownBar />}
+      </div>
+    );
+  },
 );
 
 type TSoundPickerProps = {
-  userData: TUserDataState;
   /** caps the grid inside the popover; a detached window scrolls instead */
   gridMaxHeight?: number;
   onAdd?: () => void;
@@ -139,8 +189,8 @@ type TSoundPickerProps = {
 };
 
 const SoundPicker = memo((props: TSoundPickerProps) => {
-  const { userData, gridMaxHeight, onAdd, onDetach } = props;
-  const { data, save } = userData;
+  const { gridMaxHeight, onAdd, onDetach } = props;
+  const { data, save } = useUserData<TSharkord>();
   const { sounds } = useSoundboard();
   const { isCoolingDown, startCooldown } = useCooldown();
   const { error, run } = useErrorState();
@@ -164,7 +214,7 @@ const SoundPicker = memo((props: TSoundPickerProps) => {
     run(async () => {
       const { cooldownMs } = await callAction("playSound", { soundId });
 
-      startCooldown(cooldownMs);
+      startCooldown(soundId, cooldownMs);
     });
 
   const onToggleFavorite = (soundId: string) =>
@@ -185,13 +235,18 @@ const SoundPicker = memo((props: TSoundPickerProps) => {
           autoFocus
         />
         {onAdd && (
-          <IconButton icon={Plus} title="Add a sound" onClick={onAdd} />
+          <IconButton
+            icon={Plus}
+            title="Add a sound"
+            onClick={onAdd}
+            size="sm"
+          />
         )}
         {onDetach && (
           <IconButton
             icon={PictureInPicture2}
             title="Open in a separate window"
-            // the picker shows it when the browser refuses the window
+            size="sm"
             onClick={() => run(async () => onDetach())}
           />
         )}
@@ -228,7 +283,7 @@ const SoundPicker = memo((props: TSoundPickerProps) => {
 
       <ErrorText error={error} />
 
-      <VolumeControl userData={userData} />
+      <VolumeControl />
     </Stack>
   );
 });
@@ -238,10 +293,7 @@ const channelSources = new Set<AudioBufferSourceNode>();
 
 const VoiceControls = memo(({ channelId }: { channelId: number }) => {
   const canUpload = useCanUpload();
-  // held here and handed to the picker, so the volume it saves is the one
-  // the sounds below play at
-  const userData = useUserData<TSharkord>();
-  const playbackOptions = usePlaybackOptions(userData.data);
+  const playbackOptions = usePlaybackOptions();
   const deafened = useStoreSelector((state) => state.ownVoiceState.soundMuted);
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   // lives outside the popover, which unmounts its content when it closes
@@ -254,10 +306,16 @@ const VoiceControls = memo(({ channelId }: { channelId: number }) => {
   usePush<TSharkord>(async (push) => {
     if (push.type !== "play") return;
 
-    // shown even while deafened: it says who played, not what you hear
-    if (push.showBadge) {
-      setPlaying(push.userId, push.soundName, push.durationMs);
-    }
+    // tracked even while deafened: it says who played, not what you hear
+    setPlaying(
+      push.userId,
+      {
+        soundId: push.soundId,
+        soundName: push.soundName,
+        showBadge: push.showBadge,
+      },
+      push.durationMs,
+    );
 
     if (deafened) return;
 
@@ -311,7 +369,6 @@ const VoiceControls = memo(({ channelId }: { channelId: number }) => {
         </PopoverTrigger>
         <PopoverContent side="top" align="start" style={{ width: 360 }}>
           <SoundPicker
-            userData={userData}
             gridMaxHeight={300}
             onAdd={canUpload ? openUpload : undefined}
             onDetach={detachedWindow ? undefined : detach}
@@ -321,7 +378,7 @@ const VoiceControls = memo(({ channelId }: { channelId: number }) => {
 
       {detachedWindow && (
         <DetachedWindow popup={detachedWindow} title="Soundboard">
-          <SoundPicker userData={userData} />
+          <SoundPicker />
         </DetachedWindow>
       )}
 
@@ -330,10 +387,7 @@ const VoiceControls = memo(({ channelId }: { channelId: number }) => {
           <DialogHeader>
             <DialogTitle>Add a sound</DialogTitle>
           </DialogHeader>
-          <UploadForm
-            userData={userData}
-            onUploaded={() => setIsUploadOpen(false)}
-          />
+          <UploadForm onUploaded={() => setIsUploadOpen(false)} />
         </DialogContent>
       </Dialog>
     </>

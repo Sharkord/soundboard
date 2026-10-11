@@ -11,6 +11,12 @@ const AdminTab = memo(() => {
     [],
   );
 
+  const onRename = useCallback(
+    (soundId: string, name: string) =>
+      callAction("renameAnySound", { soundId, name }),
+    [],
+  );
+
   return (
     <Stack style={{ padding: 16 }}>
       <MutedText>{sounds.length} sound(s) uploaded on this server.</MutedText>
@@ -19,6 +25,7 @@ const AdminTab = memo(() => {
         sounds={sounds}
         showUploader
         onDelete={onDelete}
+        onRename={onRename}
         emptyText="Nobody has uploaded a sound yet."
       />
     </Stack>

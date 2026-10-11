@@ -1,10 +1,17 @@
 import { AudioLines } from "lucide-react";
 import { memo, useSyncExternalStore } from "react";
 
+type TPlaying = {
+  soundId: string;
+  soundName: string;
+  /** whether the server wants the player marked on their card and row */
+  showBadge: boolean;
+};
+
 // who is playing what in the user's voice channel. Fed once by VoiceControls,
-// which hears every play, and read by every card and sidebar row: one push
-// listener for the channel instead of one per user
-const playing = new Map<number, string>();
+// which hears every play, and read by every card, sidebar row and sound card:
+// one push listener for the channel instead of one per reader
+const playing = new Map<number, TPlaying>();
 const timers = new Map<number, ReturnType<typeof setTimeout>>();
 const listeners = new Set<() => void>();
 
@@ -16,11 +23,11 @@ const subscribe = (listener: () => void) => {
   return () => listeners.delete(listener);
 };
 
-/** Marks `userId` as playing `soundName` for `durationMs`. */
-const setPlaying = (userId: number, soundName: string, durationMs: number) => {
+/** Marks `userId` as playing a sound for `durationMs`. */
+const setPlaying = (userId: number, sound: TPlaying, durationMs: number) => {
   clearTimeout(timers.get(userId));
 
-  playing.set(userId, soundName);
+  playing.set(userId, sound);
   timers.set(
     userId,
     setTimeout(() => {
@@ -43,6 +50,12 @@ const clearPlaying = () => {
 const usePlayingSound = (userId: number) =>
   useSyncExternalStore(subscribe, () => playing.get(userId));
 
+/** Whether anyone in the channel is playing `soundId` right now. */
+const useIsSoundPlaying = (soundId: string) =>
+  useSyncExternalStore(subscribe, () =>
+    [...playing.values()].some((sound) => sound.soundId === soundId),
+  );
+
 const badgeStyle = {
   display: "inline-flex",
   alignItems: "center",
@@ -61,9 +74,11 @@ type TPlayerBadgeProps = {
 };
 
 const PlayerBadge = memo(({ userId, compact }: TPlayerBadgeProps) => {
-  const soundName = usePlayingSound(userId);
+  const sound = usePlayingSound(userId);
 
-  if (!soundName) return null;
+  if (!sound?.showBadge) return null;
+
+  const { soundName } = sound;
 
   return (
     <span
@@ -100,4 +115,10 @@ const VoiceUserRowBadge = memo(({ userId }: TSlotProps) => (
   <PlayerBadge userId={userId} compact />
 ));
 
-export { VoiceUserCardBadge, VoiceUserRowBadge, clearPlaying, setPlaying };
+export {
+  VoiceUserCardBadge,
+  VoiceUserRowBadge,
+  clearPlaying,
+  setPlaying,
+  useIsSoundPlaying,
+};

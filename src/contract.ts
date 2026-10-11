@@ -35,6 +35,14 @@ type TSharkord = {
       payload: { soundId: string };
       response: void;
     };
+    renameSound: {
+      payload: { soundId: string; name: string };
+      response: void;
+    };
+    renameAnySound: {
+      payload: { soundId: string; name: string };
+      response: void;
+    };
   };
   push:
     | {

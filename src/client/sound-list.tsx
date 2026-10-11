@@ -9,33 +9,45 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
   IconButton,
+  Input,
 } from "@sharkord/ui";
-import { Play, Trash2 } from "lucide-react";
-import { memo } from "react";
-import type { TSound } from "../contract";
+import { Pencil, Play, Trash2 } from "lucide-react";
+import { memo, useState } from "react";
+import { MAX_NAME_LENGTH, type TSound } from "../contract";
 import { playSound } from "./audio";
 import {
   formatDuration,
-  usePlaybackOptions,
   useErrorState,
+  usePlaybackOptions,
   useUserName,
-  type TUserDataState,
 } from "./store";
 import { ErrorText, MutedText, Row, Stack } from "./ui";
 
 type TSoundRowProps = {
   sound: TSound;
   showUploader: boolean;
-  /** the parent's, when it lets the user change the volume */
-  userData?: TUserDataState;
   onDelete: (soundId: string) => Promise<void>;
+  onRename: (soundId: string, name: string) => Promise<void>;
 };
 
 const SoundRow = memo((props: TSoundRowProps) => {
-  const { sound, showUploader, userData, onDelete } = props;
+  const { sound, showUploader, onDelete, onRename } = props;
   const uploaderName = useUserName(sound.uploaderId);
   const { error, run } = useErrorState();
-  const playbackOptions = usePlaybackOptions(userData?.data);
+  const playbackOptions = usePlaybackOptions();
+  // the name being typed, while renaming
+  const [draftName, setDraftName] = useState<string>();
+
+  const saveName = () =>
+    run(async () => {
+      if (draftName === undefined) return;
+
+      setDraftName(undefined);
+
+      if (draftName.trim() !== sound.name) {
+        await onRename(sound.id, draftName);
+      }
+    });
 
   return (
     <Row
@@ -47,13 +59,35 @@ const SoundRow = memo((props: TSoundRowProps) => {
       }}
     >
       <Stack gap={0} style={{ flex: 1, minWidth: 0 }}>
-        <span style={{ fontWeight: 500 }}>{sound.name}</span>
+        {draftName === undefined ? (
+          <span style={{ fontWeight: 500 }}>{sound.name}</span>
+        ) : (
+          <Input
+            value={draftName}
+            maxLength={MAX_NAME_LENGTH}
+            autoFocus
+            onChange={(event) => setDraftName(event.target.value)}
+            onEnter={saveName}
+            onBlur={saveName}
+            onKeyUp={(event) => {
+              if (event.key === "Escape") setDraftName(undefined);
+            }}
+          />
+        )}
         <MutedText>
           {formatDuration(sound.durationMs)}
           {showUploader && ` · ${uploaderName ?? "Unknown user"}`}
         </MutedText>
         <ErrorText error={error} />
       </Stack>
+
+      <IconButton
+        icon={Pencil}
+        size="sm"
+        variant="ghost"
+        title="Rename"
+        onClick={() => setDraftName(sound.name)}
+      />
 
       <IconButton
         icon={Play}

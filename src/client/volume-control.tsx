@@ -1,16 +1,13 @@
+import { useUserData } from "@sharkord/plugin-sdk/client";
 import { IconButton, Slider } from "@sharkord/ui";
 import { Volume2, VolumeX } from "lucide-react";
 import { memo, useState } from "react";
-import { DEFAULT_VOLUME, type TUserDataState } from "./store";
+import type { TSharkord } from "../contract";
+import { DEFAULT_VOLUME } from "./store";
 import { Row } from "./ui";
 
-type TVolumeControlProps = {
-  /** the caller's own, so what this saves is what its sounds play at */
-  userData: TUserDataState;
-};
-
-const VolumeControl = memo(({ userData }: TVolumeControlProps) => {
-  const { data, save } = userData;
+const VolumeControl = memo(() => {
+  const { data, save } = useUserData<TSharkord>();
   // the slider moves locally and saves on release, not on every step
   const [volume, setVolume] = useState<number>();
 

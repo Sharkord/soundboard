@@ -73,27 +73,15 @@ const useUserName = (userId: number): string | undefined => {
   return users.find((user) => user.id === userId)?.name;
 };
 
-type TUserData = NonNullable<TSharkord["userData"]>;
-
-/**
- * One `useUserData` result, handed down to children: every call of the hook
- * keeps its own copy, so a second one would miss what the first one saves.
- */
-type TUserDataState = ReturnType<typeof useUserData<TSharkord>>;
-
-/**
- * How this user hears sounds: their volume, on their output device. Pass the
- * user data when a parent holds it, so a volume change reaches this too.
- */
-const usePlaybackOptions = (userData?: TUserData) => {
+/** How this user hears sounds: their volume, on their output device. */
+const usePlaybackOptions = () => {
   const { data } = useUserData<TSharkord>();
   const deviceId = usePlaybackDeviceId();
-  const { muted, volume = DEFAULT_VOLUME } = userData ?? data;
+  const { muted, volume = DEFAULT_VOLUME } = data;
 
   return { volume: muted ? 0 : volume, deviceId };
 };
 
-export type { TUserData, TUserDataState };
 export {
   DEFAULT_VOLUME,
   PLUGIN_ID,

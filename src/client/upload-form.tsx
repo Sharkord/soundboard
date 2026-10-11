@@ -3,13 +3,13 @@ import { Button, Input, Label, Slider } from "@sharkord/ui";
 import { Pause, Play, Upload } from "lucide-react";
 import { memo, useCallback, useMemo, useRef, useState } from "react";
 import { MAX_NAME_LENGTH } from "../contract";
+import { getNormalizationGain } from "../loudness";
 import { encodeOpus, getAudioContext, playBuffer } from "./audio";
 import {
   PLUGIN_ID,
   formatDuration,
   useErrorState,
   usePlaybackOptions,
-  type TUserDataState,
   useSoundboard,
 } from "./store";
 import { ErrorText, MutedText, Row, Stack } from "./ui";
@@ -80,16 +80,10 @@ const Waveform = memo(({ peaks, from, to }: TWaveformProps) => (
   </div>
 ));
 
-type TUploadFormProps = {
-  /** the parent's, when it lets the user change the volume */
-  userData?: TUserDataState;
-  onUploaded?: () => void;
-};
-
-const UploadForm = memo(({ userData, onUploaded }: TUploadFormProps) => {
+const UploadForm = memo(({ onUploaded }: { onUploaded?: () => void }) => {
   const { maxDurationMs: maxMs, maxBytes } = useSoundboard();
   const { error, setError, run } = useErrorState();
-  const playbackOptions = usePlaybackOptions(userData?.data);
+  const playbackOptions = usePlaybackOptions();
   const [buffer, setBuffer] = useState<AudioBuffer>();
   const [range, setRange] = useState<[number, number]>([0, 0]);
   const [name, setName] = useState("");
@@ -148,8 +142,11 @@ const UploadForm = memo(({ userData, onUploaded }: TUploadFormProps) => {
 
     if (previewRef.current) return stopPreview();
 
+    // at the loudness it will be stored at, so the preview is honest
+    const gain = getNormalizationGain(toMonoSlice(buffer, range[0], range[1]));
     const source = await playBuffer(buffer, {
       ...playbackOptions,
+      volume: playbackOptions.volume * gain,
       startMs: range[0],
       endMs: range[1],
     });
@@ -170,7 +167,12 @@ const UploadForm = memo(({ userData, onUploaded }: TUploadFormProps) => {
       setIsUploading(true);
 
       try {
-        const file = await encodeOpus(toMonoSlice(buffer, range[0], range[1]));
+        const samples = toMonoSlice(buffer, range[0], range[1]);
+        const gain = getNormalizationGain(samples);
+
+        samples.forEach((sample, i) => (samples[i] = sample * gain));
+
+        const file = await encodeOpus(samples);
 
         // checked here so a too large clip never leaves the browser
         if (file.size > maxBytes) {

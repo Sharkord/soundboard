@@ -11,6 +11,17 @@ import { getOggOpusDurationMs } from "../ogg";
 // its name up, and a raw character finds nothing and renders broken
 const PLAYER_REACTION_EMOJI = "loud_sound";
 
+/** The name to store, or throws why it is not one. */
+const validateName = (name: unknown): string => {
+  const trimmed = typeof name === "string" ? name.trim() : "";
+
+  if (!trimmed || trimmed.length > MAX_NAME_LENGTH) {
+    throw new Error(`The name must be 1 to ${MAX_NAME_LENGTH} characters.`);
+  }
+
+  return trimmed;
+};
+
 const sendJson = (res: ServerResponse, status: number, body: unknown) => {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
@@ -127,6 +138,23 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
 
   await removeOrphanedFiles();
 
+  /** The caller's own sound, or throws: for what only its uploader may do. */
+  const getOwnSound = (userId: number, soundId: string): TSound => {
+    const sound = getSound(soundId);
+
+    if (sound.uploaderId !== userId) {
+      throw new Error("You can only change your own sounds.");
+    }
+
+    return sound;
+  };
+
+  const renameSound = async (sound: TSound, name: unknown) => {
+    sound.name = validateName(name);
+
+    await saveSounds();
+  };
+
   const getSound = (soundId: string): TSound => {
     const sound = sounds.find((s) => s.id === soundId);
 
@@ -156,13 +184,13 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
       if (!userId) return sendJson(res, 401, { error: "Sign in first." });
 
       const params = new URL(req.url ?? "", "http://localhost").searchParams;
-      const name = params.get("name")?.trim() ?? "";
       const maxDurationMs = getMaxDurationMs();
+      let name: string;
 
-      if (!name || name.length > MAX_NAME_LENGTH) {
-        return sendJson(res, 400, {
-          error: `The name must be 1 to ${MAX_NAME_LENGTH} characters.`,
-        });
+      try {
+        name = validateName(params.get("name"));
+      } catch (error) {
+        return sendJson(res, 400, { error: getErrorMessage(error) });
       }
 
       const owned = sounds.filter((s) => s.uploaderId === userId).length;
@@ -294,15 +322,8 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
   ctx.actions.register({
     name: "deleteSound",
     description: "Deletes a sound the caller uploaded.",
-    executes: async (invoker, { soundId }) => {
-      const sound = getSound(soundId);
-
-      if (sound.uploaderId !== invoker.userId) {
-        throw new Error("You can only delete your own sounds.");
-      }
-
-      await removeSound(sound);
-    },
+    executes: async (invoker, { soundId }) =>
+      removeSound(getOwnSound(invoker.userId, soundId)),
   });
 
   ctx.actions.register({
@@ -316,6 +337,21 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
 
       ctx.logger.log(`User ${invoker.userId} deleted "${sound.name}"`);
     },
+  });
+
+  ctx.actions.register({
+    name: "renameSound",
+    description: "Renames a sound the caller uploaded.",
+    executes: async (invoker, { soundId, name }) =>
+      renameSound(getOwnSound(invoker.userId, soundId), name),
+  });
+
+  ctx.actions.register({
+    name: "renameAnySound",
+    description: "Renames any sound, whoever uploaded it.",
+    requires: Permission.MANAGE_PLUGINS,
+    executes: async (invoker, { soundId, name }) =>
+      renameSound(getSound(soundId), name),
   });
 };
 

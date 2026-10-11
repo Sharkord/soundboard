@@ -1,5 +1,4 @@
-import { useStoreSelector, useUserData } from "@sharkord/plugin-sdk/client";
-import type { TSharkord } from "../contract";
+import { useStoreSelector } from "@sharkord/plugin-sdk/client";
 import { memo, useCallback, useMemo } from "react";
 import { SoundList } from "./sound-list";
 import { callAction, useCanUpload, useSoundboard } from "./store";
@@ -9,8 +8,6 @@ import { VolumeControl } from "./volume-control";
 
 const UserSettings = memo(() => {
   const canUpload = useCanUpload();
-  // one copy for the whole page, so previews play at the volume set here
-  const userData = useUserData<TSharkord>();
   const ownUserId = useStoreSelector((state) => state.ownUserId);
   const { sounds } = useSoundboard();
 
@@ -24,15 +21,21 @@ const UserSettings = memo(() => {
     [],
   );
 
+  const onRename = useCallback(
+    (soundId: string, name: string) =>
+      callAction("renameSound", { soundId, name }),
+    [],
+  );
+
   return (
     <Stack gap={24} style={{ padding: 16 }}>
       <Section title="Volume">
-        <VolumeControl userData={userData} />
+        <VolumeControl />
       </Section>
 
       {canUpload && (
         <Section title="Upload a sound">
-          <UploadForm userData={userData} />
+          <UploadForm />
         </Section>
       )}
 
@@ -40,8 +43,8 @@ const UserSettings = memo(() => {
         <SoundList
           sounds={ownSounds}
           showUploader={false}
-          userData={userData}
           onDelete={onDelete}
+          onRename={onRename}
           emptyText="You have not uploaded any sounds."
         />
       </Section>
