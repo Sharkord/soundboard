@@ -81,7 +81,8 @@ const Waveform = memo(({ peaks, from, to }: TWaveformProps) => (
 ));
 
 const UploadForm = memo(({ onUploaded }: { onUploaded?: () => void }) => {
-  const { maxDurationMs: maxMs, maxBytes } = useSoundboard();
+  const { maxDurationMs: maxMs, maxBytes, normalizeLoudness } =
+    useSoundboard();
   const { error, setError, run } = useErrorState();
   const playbackOptions = usePlaybackOptions();
   const [buffer, setBuffer] = useState<AudioBuffer>();
@@ -137,13 +138,17 @@ const UploadForm = memo(({ onUploaded }: { onUploaded?: () => void }) => {
     setRange(start !== range[0] ? [start, start + maxMs] : [end - maxMs, end]);
   };
 
+  // the same for the preview and the upload, so what you hear is what is kept
+  const getGain = (samples: Float32Array) =>
+    normalizeLoudness ? getNormalizationGain(samples) : 1;
+
   const togglePreview = async () => {
     if (!buffer) return;
 
     if (previewRef.current) return stopPreview();
 
     // at the loudness it will be stored at, so the preview is honest
-    const gain = getNormalizationGain(toMonoSlice(buffer, range[0], range[1]));
+    const gain = getGain(toMonoSlice(buffer, range[0], range[1]));
     const source = await playBuffer(buffer, {
       ...playbackOptions,
       volume: playbackOptions.volume * gain,
@@ -168,7 +173,7 @@ const UploadForm = memo(({ onUploaded }: { onUploaded?: () => void }) => {
 
       try {
         const samples = toMonoSlice(buffer, range[0], range[1]);
-        const gain = getNormalizationGain(samples);
+        const gain = getGain(samples);
 
         samples.forEach((sample, i) => (samples[i] = sample * gain));
 

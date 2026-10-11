@@ -39,6 +39,7 @@ const useSoundboard = () => {
     sounds: [],
     maxDurationMs: 0,
     maxBytes: 0,
+    normalizeLoudness: true,
   });
 
   const refresh = useCallback(() => {

@@ -80,6 +80,14 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
       defaultValue: 0,
     },
     {
+      key: "normalizeLoudness",
+      name: "Normalize loudness",
+      description:
+        "Bring every uploaded sound to about the same loudness, so none is drowned out or deafening next to the others. Applies to new uploads only.",
+      type: "boolean",
+      defaultValue: true,
+    },
+    {
       key: "playerIndicator",
       name: "Show who played a sound",
       description:
@@ -266,6 +274,7 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
       sounds,
       maxDurationMs: getMaxDurationMs(),
       maxBytes: getMaxBytes(),
+      normalizeLoudness: settings.get("normalizeLoudness"),
     }),
   });
 

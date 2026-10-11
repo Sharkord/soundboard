@@ -14,6 +14,8 @@ type TSoundboard = {
   maxDurationMs: number;
   /** of the encoded file, so only known once a clip is trimmed and encoded */
   maxBytes: number;
+  /** bring uploads to a common loudness before they are encoded */
+  normalizeLoudness: boolean;
 };
 
 type TSharkord = {
