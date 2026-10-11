@@ -7,23 +7,29 @@ const MAX_PEAK = 0.98;
 const MAX_GAIN = 10;
 
 /**
- * The gain that brings `samples` to the target loudness without clipping.
+ * The gain that brings a clip, one array per channel, to the target loudness
+ * without clipping. One gain for every channel, so stereo keeps its balance.
  *
  * ponytail: plain RMS, not perceived loudness (LUFS). Add K-weighting if
  * bass-heavy clips still sound louder than the rest.
  */
-const getNormalizationGain = (samples: Float32Array) => {
+const getNormalizationGain = (channels: Float32Array[]) => {
   let sumOfSquares = 0;
+  let sampleCount = 0;
   let peak = 0;
 
-  for (const sample of samples) {
-    sumOfSquares += sample * sample;
-    peak = Math.max(peak, Math.abs(sample));
+  for (const samples of channels) {
+    for (const sample of samples) {
+      sumOfSquares += sample * sample;
+      peak = Math.max(peak, Math.abs(sample));
+    }
+
+    sampleCount += samples.length;
   }
 
   if (peak === 0) return 1;
 
-  const rms = Math.sqrt(sumOfSquares / samples.length);
+  const rms = Math.sqrt(sumOfSquares / sampleCount);
 
   return Math.min(TARGET_RMS / rms, MAX_PEAK / peak, MAX_GAIN);
 };

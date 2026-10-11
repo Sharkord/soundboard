@@ -3,6 +3,7 @@ import { Button, Input, Label, Slider } from "@sharkord/ui";
 import { Pause, Play, Upload } from "lucide-react";
 import { memo, useCallback, useMemo, useRef, useState } from "react";
 import { MAX_NAME_LENGTH } from "../contract";
+import { MAX_CHANNELS } from "../ogg";
 import { getNormalizationGain } from "../loudness";
 import { encodeOpus, getAudioContext, playBuffer } from "./audio";
 import {
@@ -16,33 +17,42 @@ import { ErrorText, MutedText, Row, Stack } from "./ui";
 
 const WAVEFORM_BARS = 120;
 
-const toMonoSlice = (buffer: AudioBuffer, startMs: number, endMs: number) => {
+/**
+ * The part of the clip between `startMs` and `endMs`, one array per channel.
+ * Mono and stereo are kept as they are; anything wider keeps its first two
+ * channels, which are left and right.
+ *
+ * ponytail: drops the rest of a surround file rather than mixing it in. Mix
+ * centre and surrounds into left and right if 5.1 uploads ever show up.
+ */
+const sliceChannels = (
+  buffer: AudioBuffer,
+  startMs: number,
+  endMs: number,
+): Float32Array[] => {
   const from = Math.floor((startMs / 1000) * buffer.sampleRate);
   const to = Math.min(
     buffer.length,
     Math.floor((endMs / 1000) * buffer.sampleRate),
   );
-  const samples = new Float32Array(Math.max(0, to - from));
 
-  for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
-    const data = buffer.getChannelData(channel);
-
-    for (let i = from; i < to; i++) {
-      samples[i - from]! += data[i]! / buffer.numberOfChannels;
-    }
-  }
-
-  return samples;
+  return Array.from(
+    { length: Math.min(buffer.numberOfChannels, MAX_CHANNELS) },
+    (_, channel) => buffer.getChannelData(channel).slice(from, to),
+  );
 };
 
-/** The loudest sample in each of `count` equal buckets, scaled to 0..1. */
-const getPeaks = (samples: Float32Array, count: number) => {
-  const size = Math.max(1, Math.floor(samples.length / count));
+/** The loudest sample of any channel in each of `count` equal buckets, 0..1. */
+const getPeaks = (channels: Float32Array[], count: number) => {
+  const length = channels[0]?.length ?? 0;
+  const size = Math.max(1, Math.floor(length / count));
   const peaks = Array.from({ length: count }, (_, bar) => {
     let peak = 0;
 
-    for (let i = bar * size; i < (bar + 1) * size && i < samples.length; i++) {
-      peak = Math.max(peak, Math.abs(samples[i]!));
+    for (const samples of channels) {
+      for (let i = bar * size; i < (bar + 1) * size && i < length; i++) {
+        peak = Math.max(peak, Math.abs(samples[i]!));
+      }
     }
 
     return peak;
@@ -81,8 +91,7 @@ const Waveform = memo(({ peaks, from, to }: TWaveformProps) => (
 ));
 
 const UploadForm = memo(({ onUploaded }: { onUploaded?: () => void }) => {
-  const { maxDurationMs: maxMs, maxBytes, normalizeLoudness } =
-    useSoundboard();
+  const { maxDurationMs: maxMs, maxBytes, normalizeLoudness } = useSoundboard();
   const { error, setError, run } = useErrorState();
   const playbackOptions = usePlaybackOptions();
   const [buffer, setBuffer] = useState<AudioBuffer>();
@@ -98,7 +107,9 @@ const UploadForm = memo(({ onUploaded }: { onUploaded?: () => void }) => {
 
   const peaks = useMemo(
     () =>
-      buffer ? getPeaks(toMonoSlice(buffer, 0, durationMs), WAVEFORM_BARS) : [],
+      buffer
+        ? getPeaks(sliceChannels(buffer, 0, durationMs), WAVEFORM_BARS)
+        : [],
     [buffer, durationMs],
   );
 
@@ -139,8 +150,8 @@ const UploadForm = memo(({ onUploaded }: { onUploaded?: () => void }) => {
   };
 
   // the same for the preview and the upload, so what you hear is what is kept
-  const getGain = (samples: Float32Array) =>
-    normalizeLoudness ? getNormalizationGain(samples) : 1;
+  const getGain = (channels: Float32Array[]) =>
+    normalizeLoudness ? getNormalizationGain(channels) : 1;
 
   const togglePreview = async () => {
     if (!buffer) return;
@@ -148,7 +159,7 @@ const UploadForm = memo(({ onUploaded }: { onUploaded?: () => void }) => {
     if (previewRef.current) return stopPreview();
 
     // at the loudness it will be stored at, so the preview is honest
-    const gain = getGain(toMonoSlice(buffer, range[0], range[1]));
+    const gain = getGain(sliceChannels(buffer, range[0], range[1]));
     const source = await playBuffer(buffer, {
       ...playbackOptions,
       volume: playbackOptions.volume * gain,
@@ -172,12 +183,14 @@ const UploadForm = memo(({ onUploaded }: { onUploaded?: () => void }) => {
       setIsUploading(true);
 
       try {
-        const samples = toMonoSlice(buffer, range[0], range[1]);
-        const gain = getGain(samples);
+        const channels = sliceChannels(buffer, range[0], range[1]);
+        const gain = getGain(channels);
 
-        samples.forEach((sample, i) => (samples[i] = sample * gain));
+        for (const samples of channels) {
+          samples.forEach((sample, i) => (samples[i] = sample * gain));
+        }
 
-        const file = await encodeOpus(samples);
+        const file = await encodeOpus(channels);
 
         // checked here so a too large clip never leaves the browser
         if (file.size > maxBytes) {

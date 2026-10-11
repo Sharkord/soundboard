@@ -83,13 +83,14 @@ const getSoundBuffer = (soundId: string): Promise<AudioBuffer> => {
   return buffer;
 };
 
-// plenty for short mono clips: about 10KB per second
-const OPUS_BITRATE = 64000;
+// plenty for short clips: about 10KB per second in mono, 13KB in stereo
+const OPUS_BITRATES = [64000, 96000];
 
-/** Encodes mono 48kHz samples into the Ogg Opus file the server stores. */
-const encodeOpus = async (
-  samples: Float32Array<ArrayBuffer>,
-): Promise<Blob> => {
+/**
+ * Encodes a 48kHz clip, one array per channel (mono or stereo), into the Ogg
+ * Opus file the server stores.
+ */
+const encodeOpus = async (channels: Float32Array[]): Promise<Blob> => {
   if (typeof AudioEncoder === "undefined") {
     throw new Error("This browser cannot encode audio. Try a recent one.");
   }
@@ -109,18 +110,24 @@ const encodeOpus = async (
   encoder.configure({
     codec: "opus",
     sampleRate: SAMPLE_RATE,
-    numberOfChannels: 1,
-    bitrate: OPUS_BITRATE,
+    numberOfChannels: channels.length,
+    bitrate: OPUS_BITRATES[channels.length - 1],
     opus: { frameDuration: FRAME_DURATION_US },
   });
+  const frameCount = channels[0]?.length ?? 0;
+  // planar: every channel's samples one after the other, not interleaved
+  const planes = new Float32Array(frameCount * channels.length);
+
+  channels.forEach((samples, i) => planes.set(samples, i * frameCount));
+
   encoder.encode(
     new AudioData({
-      format: "f32",
+      format: "f32-planar",
       sampleRate: SAMPLE_RATE,
-      numberOfChannels: 1,
-      numberOfFrames: samples.length,
+      numberOfChannels: channels.length,
+      numberOfFrames: frameCount,
       timestamp: 0,
-      data: samples,
+      data: planes,
     }),
   );
 
@@ -130,7 +137,7 @@ const encodeOpus = async (
     encoder.close();
   }
 
-  return muxOggOpus(packets, samples.length);
+  return muxOggOpus(packets, frameCount, channels.length);
 };
 
 const playSound = async (soundId: string, options?: TPlayOptions) =>

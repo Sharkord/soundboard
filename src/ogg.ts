@@ -1,9 +1,11 @@
-// every clip is mono Opus at 48kHz in an Ogg container (RFC 7845): the upload
-// form encodes it and the server only accepts it
+// every clip is mono or stereo Opus at 48kHz in an Ogg container (RFC 7845):
+// the upload form encodes it and the server only accepts it
 const SAMPLE_RATE = 48000;
 // libopus' lookahead at 48kHz, which the decoder skips at the start
 const PRE_SKIP = 312;
 const PAGE_HEADER_BYTES = 27;
+// mono or stereo: what Opus' simplest channel mapping, family 0, allows
+const MAX_CHANNELS = 2;
 // what the encoder is configured to, so each page's granule is known
 const FRAME_SAMPLES = 960;
 const FRAME_DURATION_US = (FRAME_SAMPLES / SAMPLE_RATE) * 1_000_000;
@@ -64,16 +66,20 @@ const writePage = ({ packet, granule, flags }: TPage, sequence: number) => {
 };
 
 /**
- * Wraps the encoder's packets, `sampleCount` samples of sound in all, into an
- * Ogg Opus file. One packet per page: a little overhead for a lot less code.
+ * Wraps the encoder's packets, `sampleCount` samples per channel in all, into
+ * an Ogg Opus file. One packet per page: a little overhead for a lot less code.
  */
-const muxOggOpus = (packets: Uint8Array[], sampleCount: number): Blob => {
+const muxOggOpus = (
+  packets: Uint8Array[],
+  sampleCount: number,
+  channelCount: number,
+): Blob => {
   const head = new Uint8Array(19);
   const headView = new DataView(head.buffer);
 
   head.set(textBytes("OpusHead"));
   head[8] = 1; // version
-  head[9] = 1; // mono
+  head[9] = channelCount;
   headView.setUint16(10, PRE_SKIP, true);
   headView.setUint32(12, SAMPLE_RATE, true);
 
@@ -101,7 +107,7 @@ const muxOggOpus = (packets: Uint8Array[], sampleCount: number): Blob => {
   return new Blob(pages.map(writePage), { type: "audio/ogg" });
 };
 
-/** Throws unless `data` is a complete, mono Ogg Opus file. */
+/** Throws unless `data` is a complete, mono or stereo Ogg Opus file. */
 const getOggOpusDurationMs = (data: Uint8Array): number => {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   let offset = 0;
@@ -126,13 +132,22 @@ const getOggOpusDurationMs = (data: Uint8Array): number => {
 
     if (pageEnd > data.length) throw new Error("The file is incomplete.");
 
-    if (view.getUint32(offset + 22, true) !== getPageCrc(data.subarray(offset, pageEnd))) {
+    if (
+      view.getUint32(offset + 22, true) !==
+      getPageCrc(data.subarray(offset, pageEnd))
+    ) {
       throw new Error("The file is corrupted.");
     }
 
     if (pageCount === 0) {
-      if (readText(data, bodyOffset, 8) !== "OpusHead" || data[bodyOffset + 9] !== 1) {
-        throw new Error("The file must be mono Opus.");
+      const channelCount = data[bodyOffset + 9] ?? 0;
+
+      if (
+        readText(data, bodyOffset, 8) !== "OpusHead" ||
+        channelCount < 1 ||
+        channelCount > MAX_CHANNELS
+      ) {
+        throw new Error("The file must be mono or stereo Opus.");
       }
 
       preSkip = view.getUint16(bodyOffset + 10, true);
@@ -151,4 +166,10 @@ const getOggOpusDurationMs = (data: Uint8Array): number => {
   return (Number(granule - BigInt(preSkip)) / SAMPLE_RATE) * 1000;
 };
 
-export { FRAME_DURATION_US, SAMPLE_RATE, getOggOpusDurationMs, muxOggOpus };
+export {
+  FRAME_DURATION_US,
+  MAX_CHANNELS,
+  SAMPLE_RATE,
+  getOggOpusDurationMs,
+  muxOggOpus,
+};

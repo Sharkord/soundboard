@@ -60,7 +60,7 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
       key: "maxFileSizeKb",
       name: "Maximum file size (KB)",
       description:
-        "The largest sound anyone can upload. Sounds are stored as mono Opus, about 10KB per second.",
+        "The largest sound anyone can upload. Sounds are stored as Opus, about 10KB per second in mono and 13KB in stereo.",
       type: "number",
       defaultValue: 256,
     },
