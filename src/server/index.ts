@@ -3,7 +3,13 @@ import { randomUUID } from "crypto";
 import fs from "fs/promises";
 import type { IncomingMessage, ServerResponse } from "http";
 import path from "path";
-import { MAX_NAME_LENGTH, type TSharkord, type TSound } from "../contract";
+import {
+  MAX_NAME_LENGTH,
+  type TCategory,
+  type TSharkord,
+  type TSound,
+  type TSoundChanges,
+} from "../contract";
 import { getErrorMessage } from "../helpers";
 import { getOggOpusDurationMs } from "../ogg";
 
@@ -80,6 +86,14 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
       defaultValue: 0,
     },
     {
+      key: "allowSpam",
+      name: "Allow spamming sounds",
+      description:
+        "Turns the cooldown off entirely: users can play sounds back to back and over each other, without waiting for the last one to end. Overrides the cooldown above.",
+      type: "boolean",
+      defaultValue: false,
+    },
+    {
       key: "normalizeLoudness",
       name: "Normalize loudness",
       description:
@@ -105,10 +119,15 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
 
   const soundsDir = path.join(ctx.dataPath, "sounds");
   const indexPath = path.join(ctx.dataPath, "sounds.json");
+  // its own file, so sounds.json kept its shape when categories came along
+  const categoriesPath = path.join(ctx.dataPath, "categories.json");
 
   await fs.mkdir(soundsDir, { recursive: true });
 
   const sounds: TSound[] = await Bun.file(indexPath)
+    .json()
+    .catch(() => []);
+  const categories: TCategory[] = await Bun.file(categoriesPath)
     .json()
     .catch(() => []);
   const cooldownUntil = new Map<number, number>();
@@ -134,7 +153,9 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
   // whatever no sound points to: left by a crash between writing a file and
   // saving the index, or by an older version's format
   const removeOrphanedFiles = async () => {
-    const keep = new Set(sounds.map((sound) => path.basename(getSoundPath(sound))));
+    const keep = new Set(
+      sounds.map((sound) => path.basename(getSoundPath(sound))),
+    );
     const files = await fs.readdir(soundsDir);
 
     await Promise.all(
@@ -157,10 +178,44 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
     return sound;
   };
 
-  const renameSound = async (sound: TSound, name: unknown) => {
-    sound.name = validateName(name);
+  /** The category to file a sound under, or throws. Empty means none. */
+  const validateCategoryId = (categoryId: unknown): string | undefined => {
+    if (categoryId === null || categoryId === undefined || categoryId === "") {
+      return undefined;
+    }
+
+    getCategory(categoryId);
+
+    return categoryId as string;
+  };
+
+  // the client sends the changes, so each is checked before any is applied
+  const updateSound = async (sound: TSound, changes: TSoundChanges) => {
+    const name =
+      changes.name === undefined ? sound.name : validateName(changes.name);
+    const categoryId =
+      changes.categoryId === undefined
+        ? sound.categoryId
+        : validateCategoryId(changes.categoryId);
+
+    sound.name = name;
+    sound.categoryId = categoryId;
 
     await saveSounds();
+  };
+
+  const getCategory = (categoryId: unknown): TCategory => {
+    const category = categories.find((c) => c.id === categoryId);
+
+    if (!category) throw new Error("That category no longer exists.");
+
+    return category;
+  };
+
+  const saveCategories = async () => {
+    await Bun.write(categoriesPath, JSON.stringify(categories));
+
+    ctx.push.toAll({ type: "changed" });
   };
 
   const getSound = (soundId: string): TSound => {
@@ -194,9 +249,11 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
       const params = new URL(req.url ?? "", "http://localhost").searchParams;
       const maxDurationMs = getMaxDurationMs();
       let name: string;
+      let categoryId: string | undefined;
 
       try {
         name = validateName(params.get("name"));
+        categoryId = validateCategoryId(params.get("categoryId"));
       } catch (error) {
         return sendJson(res, 400, { error: getErrorMessage(error) });
       }
@@ -229,6 +286,7 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
       const sound: TSound = {
         id: randomUUID(),
         name,
+        categoryId,
         uploaderId: userId,
         durationMs: Math.round(durationMs),
         createdAt: Date.now(),
@@ -272,6 +330,7 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
     name: "getSoundboard",
     executes: async () => ({
       sounds,
+      categories,
       maxDurationMs: getMaxDurationMs(),
       maxBytes: getMaxBytes(),
       normalizeLoudness: settings.get("normalizeLoudness"),
@@ -294,11 +353,11 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
         throw new Error("Wait a moment before playing another sound.");
       }
 
-      // a sound longer than the cooldown blocks the next one until it ends
-      const cooldownMs = Math.max(
-        getLimit("cooldownSeconds") * 1000,
-        sound.durationMs,
-      );
+      // a sound longer than the cooldown blocks the next one until it ends,
+      // unless the admin turned the cooldown off entirely
+      const cooldownMs = settings.get("allowSpam")
+        ? 0
+        : Math.max(getLimit("cooldownSeconds") * 1000, sound.durationMs);
 
       cooldownUntil.set(invoker.userId, now + cooldownMs);
 
@@ -349,18 +408,63 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
   });
 
   ctx.actions.register({
-    name: "renameSound",
-    description: "Renames a sound the caller uploaded.",
-    executes: async (invoker, { soundId, name }) =>
-      renameSound(getOwnSound(invoker.userId, soundId), name),
+    name: "updateSound",
+    description: "Renames or recategorizes a sound the caller uploaded.",
+    executes: async (invoker, { soundId, changes }) =>
+      updateSound(getOwnSound(invoker.userId, soundId), changes ?? {}),
   });
 
   ctx.actions.register({
-    name: "renameAnySound",
-    description: "Renames any sound, whoever uploaded it.",
+    name: "updateAnySound",
+    description: "Renames or recategorizes any sound, whoever uploaded it.",
     requires: Permission.MANAGE_PLUGINS,
-    executes: async (invoker, { soundId, name }) =>
-      renameSound(getSound(soundId), name),
+    executes: async (invoker, { soundId, changes }) =>
+      updateSound(getSound(soundId), changes ?? {}),
+  });
+
+  ctx.actions.register({
+    name: "createCategory",
+    description: "Adds a category to group sounds under.",
+    requires: Permission.MANAGE_PLUGINS,
+    executes: async (invoker, { name }) => {
+      const category: TCategory = {
+        id: randomUUID(),
+        name: validateName(name),
+      };
+
+      categories.push(category);
+
+      await saveCategories();
+
+      return category;
+    },
+  });
+
+  ctx.actions.register({
+    name: "renameCategory",
+    requires: Permission.MANAGE_PLUGINS,
+    executes: async (invoker, { categoryId, name }) => {
+      getCategory(categoryId).name = validateName(name);
+
+      await saveCategories();
+    },
+  });
+
+  ctx.actions.register({
+    name: "deleteCategory",
+    description: "Deletes a category. Its sounds are kept, in no category.",
+    requires: Permission.MANAGE_PLUGINS,
+    executes: async (invoker, { categoryId }) => {
+      const category = getCategory(categoryId);
+
+      categories.splice(categories.indexOf(category), 1);
+
+      for (const sound of sounds) {
+        if (sound.categoryId === category.id) delete sound.categoryId;
+      }
+
+      await Promise.all([saveSounds(), saveCategories()]);
+    },
   });
 };
 

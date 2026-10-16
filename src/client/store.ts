@@ -37,6 +37,7 @@ const useErrorState = () => {
 const useSoundboard = () => {
   const [soundboard, setSoundboard] = useState<TSoundboard>({
     sounds: [],
+    categories: [],
     maxDurationMs: 0,
     maxBytes: 0,
     normalizeLoudness: true,

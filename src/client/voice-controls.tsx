@@ -16,10 +16,10 @@ import {
   PopoverTrigger,
 } from "@sharkord/ui";
 import { AudioLines, Heart, PictureInPicture2, Plus } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import type { TSharkord, TSound } from "../contract";
+import { groupSounds } from "../groups";
 import {
-  callAction,
   useCanUpload,
   useErrorState,
   usePlaybackOptions,
@@ -27,97 +27,34 @@ import {
 } from "./store";
 import { ErrorText, MutedText, Row, Stack } from "./ui";
 import { playSound } from "./audio";
+import { CooldownBar, requestPlay, useCooldown } from "./cooldown";
 import {
   DetachedWindow,
   openDetachedWindow,
   useDetachedWindowLifecycle,
 } from "./detached-window";
 import { clearPlaying, setPlaying, useIsSoundPlaying } from "./player-badge";
+import { SoundHotkeyButton, SoundHotkeyLabel, SoundHotkeys } from "./hotkeys";
 import { UploadForm } from "./upload-form";
 import { VolumeControl } from "./volume-control";
 
 const FAVORITE_COLOR = "#ef4444";
 
+// sized for cards around 120px square: big enough to read and hit quickly
 const GRID_COLUMNS = 4;
-
-// shared by every picker, so closing and reopening the popover does not
-// re-enable the buttons early
-let cooldownStartedAt = 0;
-let cooldownUntil = 0;
-// the sound the user played, the one card that shows the cooldown
-let cooldownSoundId: string | undefined;
-
-/** Whether the user's last play is still cooling down, as the server counts it. */
-const useCooldown = () => {
-  const [isCoolingDown, setIsCoolingDown] = useState(
-    () => Date.now() < cooldownUntil,
-  );
-
-  useEffect(() => {
-    if (!isCoolingDown) return;
-
-    const timeout = setTimeout(
-      () => setIsCoolingDown(false),
-      cooldownUntil - Date.now(),
-    );
-
-    return () => clearTimeout(timeout);
-  }, [isCoolingDown]);
-
-  const startCooldown = useCallback((soundId: string, cooldownMs: number) => {
-    cooldownSoundId = soundId;
-    cooldownStartedAt = Date.now();
-    cooldownUntil = cooldownStartedAt + cooldownMs;
-    setIsCoolingDown(cooldownMs > 0);
-  }, []);
-
-  return { isCoolingDown, startCooldown };
-};
-
-/** Shrinks away over what is left of the cooldown, from where it is now. */
-const CooldownBar = memo(() => {
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const remaining = cooldownUntil - Date.now();
-
-    if (!ref.current || remaining <= 0) return;
-
-    const animation = ref.current.animate(
-      [
-        {
-          transform: `scaleX(${remaining / (cooldownUntil - cooldownStartedAt)})`,
-        },
-        { transform: "scaleX(0)" },
-      ],
-      { duration: remaining, fill: "forwards" },
-    );
-
-    return () => animation.cancel();
-  }, []);
-
-  return (
-    <div
-      ref={ref}
-      style={{
-        position: "absolute",
-        left: 6,
-        right: 6,
-        bottom: 4,
-        height: 3,
-        borderRadius: 2,
-        background: "var(--primary)",
-        transformOrigin: "left",
-        pointerEvents: "none",
-      }}
-    />
-  );
-});
+const GRID_GAP = 8;
+const POPOVER_WIDTH = 520;
+const POPOVER_GRID_MAX_HEIGHT = 440;
+const DETACHED_WINDOW_SIZE = { width: 560, height: 720 };
 
 type TSoundCardProps = {
   sound: TSound;
   isFavorite: boolean;
   disabled: boolean;
+  /** the card of the sound the user played, which shows the cooldown */
+  showCooldown: boolean;
+  /** false in the detached window, where a popover would open in the main one */
+  canEditHotkey: boolean;
   onPlay: (soundId: string) => void;
   onToggleFavorite: (soundId: string) => void;
 };
@@ -127,6 +64,8 @@ const SoundCard = memo(
     sound,
     isFavorite,
     disabled,
+    showCooldown,
+    canEditHotkey,
     onPlay,
     onToggleFavorite,
   }: TSoundCardProps) => {
@@ -144,7 +83,7 @@ const SoundCard = memo(
             height: "100%",
             padding: 6,
             whiteSpace: "normal",
-            fontSize: 12,
+            fontSize: 13,
             lineHeight: 1.2,
           }}
           onClick={() => onPlay(sound.id)}
@@ -175,47 +114,62 @@ const SoundCard = memo(
           />
         </Button>
 
-        {disabled && sound.id === cooldownSoundId && <CooldownBar />}
+        {canEditHotkey ? (
+          <SoundHotkeyButton soundId={sound.id} compact />
+        ) : (
+          <SoundHotkeyLabel soundId={sound.id} />
+        )}
+
+        {showCooldown && <CooldownBar />}
       </div>
     );
   },
 );
 
+const GroupHeading = ({ children }: { children: string }) => (
+  <span
+    style={{
+      fontSize: 11,
+      fontWeight: 600,
+      letterSpacing: "0.05em",
+      textTransform: "uppercase",
+      color: "var(--muted-foreground)",
+    }}
+  >
+    {children}
+  </span>
+);
+
 type TSoundPickerProps = {
   /** caps the grid inside the popover; a detached window scrolls instead */
   gridMaxHeight?: number;
+  /** a picker in the detached window cannot open popovers there */
+  isDetached?: boolean;
   onAdd?: () => void;
   onDetach?: () => void;
 };
 
 const SoundPicker = memo((props: TSoundPickerProps) => {
-  const { gridMaxHeight, onAdd, onDetach } = props;
+  const { gridMaxHeight, isDetached, onAdd, onDetach } = props;
   const { data, save } = useUserData<TSharkord>();
-  const { sounds } = useSoundboard();
-  const { isCoolingDown, startCooldown } = useCooldown();
+  const { sounds, categories } = useSoundboard();
+  const cooldown = useCooldown();
   const { error, run } = useErrorState();
   const [search, setSearch] = useState("");
 
   const favorites = data.favorites ?? [];
 
-  const visibleSounds = useMemo(() => {
+  const groups = useMemo(() => {
     const query = search.trim().toLowerCase();
 
-    return sounds
-      .filter((sound) => sound.name.toLowerCase().includes(query))
-      .sort(
-        (a, b) =>
-          Number(favorites.includes(b.id)) - Number(favorites.includes(a.id)) ||
-          a.name.localeCompare(b.name),
-      );
-  }, [sounds, favorites, search]);
+    return groupSounds(
+      sounds.filter((sound) => sound.name.toLowerCase().includes(query)),
+      categories,
+      favorites,
+    );
+  }, [sounds, categories, favorites, search]);
 
-  const onPlay = (soundId: string) =>
-    run(async () => {
-      const { cooldownMs } = await callAction("playSound", { soundId });
-
-      startCooldown(soundId, cooldownMs);
-    });
+  const onPlay = (soundId: string) => run(() => requestPlay(soundId));
 
   const onToggleFavorite = (soundId: string) =>
     save({
@@ -226,7 +180,16 @@ const SoundPicker = memo((props: TSoundPickerProps) => {
     });
 
   return (
-    <Stack gap={8}>
+    <Stack
+      gap={8}
+      // in its own window, the picker is the window's height, and the
+      // sounds take whatever search and volume leave and scroll in it
+      style={
+        isDetached
+          ? { display: "flex", flexDirection: "column", height: "100%" }
+          : undefined
+      }
+    >
       <Row>
         <Input
           placeholder="Search sounds"
@@ -252,28 +215,44 @@ const SoundPicker = memo((props: TSoundPickerProps) => {
         )}
       </Row>
 
-      <div
+      <Stack
+        gap={12}
         style={{
-          display: "grid",
-          gridTemplateColumns: `repeat(${GRID_COLUMNS}, minmax(0, 1fr))`,
-          gap: 6,
           maxHeight: gridMaxHeight,
           overflowY: "auto",
+          ...(isDetached && { flex: 1, minHeight: 0, alignContent: "start" }),
         }}
       >
-        {visibleSounds.map((sound) => (
-          <SoundCard
-            key={sound.id}
-            sound={sound}
-            isFavorite={favorites.includes(sound.id)}
-            disabled={isCoolingDown}
-            onPlay={onPlay}
-            onToggleFavorite={onToggleFavorite}
-          />
+        {groups.map((group) => (
+          <Stack key={group.title ?? "all"} gap={6}>
+            {group.title && <GroupHeading>{group.title}</GroupHeading>}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: `repeat(${GRID_COLUMNS}, minmax(0, 1fr))`,
+                gap: GRID_GAP,
+              }}
+            >
+              {group.sounds.map((sound) => (
+                <SoundCard
+                  key={sound.id}
+                  sound={sound}
+                  isFavorite={favorites.includes(sound.id)}
+                  disabled={cooldown.isActive}
+                  showCooldown={
+                    cooldown.isActive && cooldown.soundId === sound.id
+                  }
+                  canEditHotkey={!isDetached}
+                  onPlay={onPlay}
+                  onToggleFavorite={onToggleFavorite}
+                />
+              ))}
+            </div>
+          </Stack>
         ))}
-      </div>
+      </Stack>
 
-      {visibleSounds.length === 0 && (
+      {groups.length === 0 && (
         <MutedText>
           {sounds.length === 0
             ? "No sounds yet."
@@ -292,6 +271,7 @@ const SoundPicker = memo((props: TSoundPickerProps) => {
 const channelSources = new Set<AudioBufferSourceNode>();
 
 const VoiceControls = memo(({ channelId }: { channelId: number }) => {
+  const { sounds } = useSoundboard();
   const canUpload = useCanUpload();
   const playbackOptions = usePlaybackOptions();
   const deafened = useStoreSelector((state) => state.ownVoiceState.soundMuted);
@@ -350,7 +330,12 @@ const VoiceControls = memo(({ channelId }: { channelId: number }) => {
   );
 
   const detach = () => {
-    setDetachedWindow(openDetachedWindow(420, 560));
+    setDetachedWindow(
+      openDetachedWindow(
+        DETACHED_WINDOW_SIZE.width,
+        DETACHED_WINDOW_SIZE.height,
+      ),
+    );
     setIsPickerOpen(false);
   };
 
@@ -367,9 +352,13 @@ const VoiceControls = memo(({ channelId }: { channelId: number }) => {
             <AudioLines className="h-4 w-4" />
           </Button>
         </PopoverTrigger>
-        <PopoverContent side="top" align="start" style={{ width: 360 }}>
+        <PopoverContent
+          side="top"
+          align="start"
+          style={{ width: POPOVER_WIDTH }}
+        >
           <SoundPicker
-            gridMaxHeight={300}
+            gridMaxHeight={POPOVER_GRID_MAX_HEIGHT}
             onAdd={canUpload ? openUpload : undefined}
             onDetach={detachedWindow ? undefined : detach}
           />
@@ -378,9 +367,12 @@ const VoiceControls = memo(({ channelId }: { channelId: number }) => {
 
       {detachedWindow && (
         <DetachedWindow popup={detachedWindow} title="Soundboard">
-          <SoundPicker />
+          <SoundPicker isDetached />
         </DetachedWindow>
       )}
+
+      {/* here, mounted once for as long as the user is in voice */}
+      <SoundHotkeys sounds={sounds} />
 
       <Dialog open={isUploadOpen} onOpenChange={setIsUploadOpen}>
         <DialogContent close={() => setIsUploadOpen(false)}>

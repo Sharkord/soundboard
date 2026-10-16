@@ -30,7 +30,13 @@ const ErrorText = ({ error }: { error: string }) =>
     <span style={{ color: "var(--destructive)", fontSize: 13 }}>{error}</span>
   ) : null;
 
-const Section = ({ title, children }: { title: string; children: ReactNode }) => (
+const Section = ({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) => (
   <Stack>
     <h3 style={{ fontSize: 16, fontWeight: 600 }}>{title}</h3>
     {children}

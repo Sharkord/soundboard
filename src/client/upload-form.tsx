@@ -6,6 +6,7 @@ import { MAX_NAME_LENGTH } from "../contract";
 import { MAX_CHANNELS } from "../ogg";
 import { getNormalizationGain } from "../loudness";
 import { encodeOpus, getAudioContext, playBuffer } from "./audio";
+import { CategorySelect } from "./categories";
 import {
   PLUGIN_ID,
   formatDuration,
@@ -91,12 +92,19 @@ const Waveform = memo(({ peaks, from, to }: TWaveformProps) => (
 ));
 
 const UploadForm = memo(({ onUploaded }: { onUploaded?: () => void }) => {
-  const { maxDurationMs: maxMs, maxBytes, normalizeLoudness } = useSoundboard();
+  const {
+    maxDurationMs: maxMs,
+    maxBytes,
+    normalizeLoudness,
+    categories,
+  } = useSoundboard();
   const { error, setError, run } = useErrorState();
   const playbackOptions = usePlaybackOptions();
   const [buffer, setBuffer] = useState<AudioBuffer>();
   const [range, setRange] = useState<[number, number]>([0, 0]);
   const [name, setName] = useState("");
+  // kept after an upload, so a batch of sounds can share one
+  const [categoryId, setCategoryId] = useState<string>();
   const [isUploading, setIsUploading] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
   // a new key clears the file input after an upload
@@ -201,7 +209,7 @@ const UploadForm = memo(({ onUploaded }: { onUploaded?: () => void }) => {
 
         const res = await actions.fetchPluginRoute(
           PLUGIN_ID,
-          `/sounds?${new URLSearchParams({ name })}`,
+          `/sounds?${new URLSearchParams({ name, categoryId: categoryId ?? "" })}`,
           {
             method: "POST",
             headers: { "content-type": "audio/ogg" },
@@ -259,14 +267,26 @@ const UploadForm = memo(({ onUploaded }: { onUploaded?: () => void }) => {
             </MutedText>
           </Stack>
 
-          <Stack gap={6}>
-            <Label>Name</Label>
-            <Input
-              value={name}
-              maxLength={MAX_NAME_LENGTH}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </Stack>
+          <Row style={{ alignItems: "end" }}>
+            <Stack gap={6} style={{ flex: 1 }}>
+              <Label>Name</Label>
+              <Input
+                value={name}
+                maxLength={MAX_NAME_LENGTH}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </Stack>
+            {categories.length > 0 && (
+              <Stack gap={6}>
+                <Label>Category</Label>
+                <CategorySelect
+                  categories={categories}
+                  value={categoryId}
+                  onChange={setCategoryId}
+                />
+              </Stack>
+            )}
+          </Row>
 
           <Row>
             <Button variant="secondary" onClick={togglePreview}>

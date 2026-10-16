@@ -78,7 +78,9 @@ const DetachedWindow = ({ popup, title, children }: TDetachedWindowProps) => {
     // a new popup's blank page can still be swapped for another one, which
     // would wipe what is drawn here. Writing the document cancels that swap.
     popupDocument.open();
-    popupDocument.write("<!doctype html><html><head></head><body></body></html>");
+    popupDocument.write(
+      "<!doctype html><html><head></head><body></body></html>",
+    );
     popupDocument.close();
 
     popupDocument.title = title;
@@ -102,7 +104,11 @@ const DetachedWindow = ({ popup, title, children }: TDetachedWindowProps) => {
         popupDocument.head.appendChild(copy);
       });
 
+    // exactly the window's height, never more: the host's stylesheet keeps
+    // the page itself from scrolling, so whatever scrolls is inside this
     Object.assign(popupDocument.body.style, {
+      height: "100vh",
+      boxSizing: "border-box",
       margin: "0",
       padding: "12px",
       background: "var(--background)",
@@ -110,6 +116,8 @@ const DetachedWindow = ({ popup, title, children }: TDetachedWindowProps) => {
     });
 
     const root = popupDocument.createElement("div");
+
+    root.style.height = "100%";
 
     popupDocument.body.replaceChildren(root);
     setContainer(root);

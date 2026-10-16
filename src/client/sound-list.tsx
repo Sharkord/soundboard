@@ -13,8 +13,15 @@ import {
 } from "@sharkord/ui";
 import { Pencil, Play, Trash2 } from "lucide-react";
 import { memo, useState } from "react";
-import { MAX_NAME_LENGTH, type TSound } from "../contract";
+import {
+  MAX_NAME_LENGTH,
+  type TCategory,
+  type TSound,
+  type TSoundChanges,
+} from "../contract";
 import { playSound } from "./audio";
+import { CategorySelect } from "./categories";
+import { SoundHotkeyButton } from "./hotkeys";
 import {
   formatDuration,
   useErrorState,
@@ -25,13 +32,17 @@ import { ErrorText, MutedText, Row, Stack } from "./ui";
 
 type TSoundRowProps = {
   sound: TSound;
+  categories: TCategory[];
   showUploader: boolean;
+  /** lets the user bind a key to the sound, for their own list */
+  showHotkey?: boolean;
   onDelete: (soundId: string) => Promise<void>;
-  onRename: (soundId: string, name: string) => Promise<void>;
+  onUpdate: (soundId: string, changes: TSoundChanges) => Promise<void>;
 };
 
 const SoundRow = memo((props: TSoundRowProps) => {
-  const { sound, showUploader, onDelete, onRename } = props;
+  const { sound, categories, showUploader, showHotkey, onDelete, onUpdate } =
+    props;
   const uploaderName = useUserName(sound.uploaderId);
   const { error, run } = useErrorState();
   const playbackOptions = usePlaybackOptions();
@@ -45,7 +56,7 @@ const SoundRow = memo((props: TSoundRowProps) => {
       setDraftName(undefined);
 
       if (draftName.trim() !== sound.name) {
-        await onRename(sound.id, draftName);
+        await onUpdate(sound.id, { name: draftName });
       }
     });
 
@@ -80,6 +91,17 @@ const SoundRow = memo((props: TSoundRowProps) => {
         </MutedText>
         <ErrorText error={error} />
       </Stack>
+
+      <CategorySelect
+        categories={categories}
+        value={sound.categoryId}
+        size="sm"
+        onChange={(categoryId) =>
+          run(() => onUpdate(sound.id, { categoryId: categoryId ?? null }))
+        }
+      />
+
+      {showHotkey && <SoundHotkeyButton soundId={sound.id} />}
 
       <IconButton
         icon={Pencil}
@@ -130,14 +152,16 @@ type TSoundListProps = Omit<TSoundRowProps, "sound"> & {
   emptyText: string;
 };
 
-const SoundList = memo(({ sounds, emptyText, ...rowProps }: TSoundListProps) => (
-  <Stack gap={6}>
-    {sounds.map((sound) => (
-      <SoundRow key={sound.id} sound={sound} {...rowProps} />
-    ))}
+const SoundList = memo(
+  ({ sounds, emptyText, ...rowProps }: TSoundListProps) => (
+    <Stack gap={6}>
+      {sounds.map((sound) => (
+        <SoundRow key={sound.id} sound={sound} {...rowProps} />
+      ))}
 
-    {sounds.length === 0 && <MutedText>{emptyText}</MutedText>}
-  </Stack>
-));
+      {sounds.length === 0 && <MutedText>{emptyText}</MutedText>}
+    </Stack>
+  ),
+);
 
 export { SoundList };

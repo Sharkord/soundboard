@@ -1,5 +1,6 @@
 import { useStoreSelector } from "@sharkord/plugin-sdk/client";
 import { memo, useCallback, useMemo } from "react";
+import type { TSoundChanges } from "../contract";
 import { SoundList } from "./sound-list";
 import { callAction, useCanUpload, useSoundboard } from "./store";
 import { Section, Stack } from "./ui";
@@ -9,7 +10,7 @@ import { VolumeControl } from "./volume-control";
 const UserSettings = memo(() => {
   const canUpload = useCanUpload();
   const ownUserId = useStoreSelector((state) => state.ownUserId);
-  const { sounds } = useSoundboard();
+  const { sounds, categories } = useSoundboard();
 
   const ownSounds = useMemo(
     () => sounds.filter((sound) => sound.uploaderId === ownUserId),
@@ -21,9 +22,9 @@ const UserSettings = memo(() => {
     [],
   );
 
-  const onRename = useCallback(
-    (soundId: string, name: string) =>
-      callAction("renameSound", { soundId, name }),
+  const onUpdate = useCallback(
+    (soundId: string, changes: TSoundChanges) =>
+      callAction("updateSound", { soundId, changes }),
     [],
   );
 
@@ -43,8 +44,10 @@ const UserSettings = memo(() => {
         <SoundList
           sounds={ownSounds}
           showUploader={false}
+          showHotkey
           onDelete={onDelete}
-          onRename={onRename}
+          onUpdate={onUpdate}
+          categories={categories}
           emptyText="You have not uploaded any sounds."
         />
       </Section>

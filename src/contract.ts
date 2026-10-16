@@ -1,16 +1,30 @@
 /** shared so the form and the server agree on what fits */
 const MAX_NAME_LENGTH = 32;
 
+type TCategory = {
+  id: string;
+  name: string;
+};
+
 type TSound = {
   id: string;
   name: string;
+  /** absent for a sound in no category, which the soundboard lists last */
+  categoryId?: string;
   uploaderId: number;
   durationMs: number;
   createdAt: number;
 };
 
+/** What an edit to a sound changes. `categoryId: null` takes it out of one. */
+type TSoundChanges = {
+  name?: string;
+  categoryId?: string | null;
+};
+
 type TSoundboard = {
   sounds: TSound[];
+  categories: TCategory[];
   maxDurationMs: number;
   /** of the encoded file, so only known once a clip is trimmed and encoded */
   maxBytes: number;
@@ -37,12 +51,24 @@ type TSharkord = {
       payload: { soundId: string };
       response: void;
     };
-    renameSound: {
-      payload: { soundId: string; name: string };
+    updateSound: {
+      payload: { soundId: string; changes: TSoundChanges };
       response: void;
     };
-    renameAnySound: {
-      payload: { soundId: string; name: string };
+    updateAnySound: {
+      payload: { soundId: string; changes: TSoundChanges };
+      response: void;
+    };
+    createCategory: {
+      payload: { name: string };
+      response: TCategory;
+    };
+    renameCategory: {
+      payload: { categoryId: string; name: string };
+      response: void;
+    };
+    deleteCategory: {
+      payload: { categoryId: string };
       response: void;
     };
   };
@@ -67,4 +93,4 @@ type TSharkord = {
 };
 
 export { MAX_NAME_LENGTH };
-export type { TSharkord, TSound, TSoundboard };
+export type { TCategory, TSharkord, TSound, TSoundChanges, TSoundboard };
