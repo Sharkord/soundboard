@@ -14,6 +14,25 @@ type TPlaying = {
 const playing = new Map<number, TPlaying>();
 const timers = new Map<number, ReturnType<typeof setTimeout>>();
 const listeners = new Set<() => void>();
+// how many players each sound has, so a card checks itself in O(1)
+const playerCounts = new Map<string, number>();
+
+const countPlayer = (soundId: string, change: 1 | -1) => {
+  const count = (playerCounts.get(soundId) ?? 0) + change;
+
+  if (count > 0) playerCounts.set(soundId, count);
+  else playerCounts.delete(soundId);
+};
+
+const removePlayer = (userId: number) => {
+  const sound = playing.get(userId);
+
+  if (sound) countPlayer(sound.soundId, -1);
+
+  playing.delete(userId);
+  clearTimeout(timers.get(userId));
+  timers.delete(userId);
+};
 
 const emit = () => listeners.forEach((listener) => listener());
 
@@ -25,14 +44,14 @@ const subscribe = (listener: () => void) => {
 
 /** Marks `userId` as playing a sound for `durationMs`. */
 const setPlaying = (userId: number, sound: TPlaying, durationMs: number) => {
-  clearTimeout(timers.get(userId));
+  removePlayer(userId);
 
   playing.set(userId, sound);
+  countPlayer(sound.soundId, 1);
   timers.set(
     userId,
     setTimeout(() => {
-      playing.delete(userId);
-      timers.delete(userId);
+      removePlayer(userId);
       emit();
     }, durationMs),
   );
@@ -44,6 +63,7 @@ const clearPlaying = () => {
   timers.forEach(clearTimeout);
   timers.clear();
   playing.clear();
+  playerCounts.clear();
   emit();
 };
 
@@ -52,9 +72,7 @@ const usePlayingSound = (userId: number) =>
 
 /** Whether anyone in the channel is playing `soundId` right now. */
 const useIsSoundPlaying = (soundId: string) =>
-  useSyncExternalStore(subscribe, () =>
-    [...playing.values()].some((sound) => sound.soundId === soundId),
-  );
+  useSyncExternalStore(subscribe, () => playerCounts.has(soundId));
 
 const badgeStyle = {
   display: "inline-flex",

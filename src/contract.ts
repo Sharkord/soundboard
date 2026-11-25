@@ -43,6 +43,11 @@ type TSharkord = {
       /** until the caller can play again */
       response: { cooldownMs: number };
     };
+    getPlayCounts: {
+      payload: void;
+      /** by sound id; a sound never played is missing */
+      response: Record<string, number>;
+    };
     deleteSound: {
       payload: { soundId: string };
       response: void;
@@ -86,6 +91,10 @@ type TSharkord = {
     | { type: "changed" };
   userData: {
     favorites?: string[];
+    /** the sounds this user played last, newest first */
+    recent?: string[];
+    /** ids of the soundboard groups this user folded away */
+    collapsed?: string[];
     /** 0 to 1, kept while muted so unmuting restores it */
     volume?: number;
     muted?: boolean;

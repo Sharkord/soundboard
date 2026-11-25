@@ -9,8 +9,21 @@ type TStackProps = {
   children: ReactNode;
 };
 
+// a grid sizes to its widest child by default, so one wide child (a long
+// stepper, a long name) would push the whole stack, dialog and all, past its
+// container. Both zero minimums keep it to the width it is given instead.
 const Stack = ({ gap = 12, style, children }: TStackProps) => (
-  <div style={{ display: "grid", gap, ...style }}>{children}</div>
+  <div
+    style={{
+      display: "grid",
+      gridTemplateColumns: "minmax(0, 1fr)",
+      minWidth: 0,
+      gap,
+      ...style,
+    }}
+  >
+    {children}
+  </div>
 );
 
 const Row = ({ gap = 8, style, children }: TStackProps) => (
@@ -30,17 +43,4 @@ const ErrorText = ({ error }: { error: string }) =>
     <span style={{ color: "var(--destructive)", fontSize: 13 }}>{error}</span>
   ) : null;
 
-const Section = ({
-  title,
-  children,
-}: {
-  title: string;
-  children: ReactNode;
-}) => (
-  <Stack>
-    <h3 style={{ fontSize: 16, fontWeight: 600 }}>{title}</h3>
-    {children}
-  </Stack>
-);
-
-export { ErrorText, MutedText, Row, Section, Stack };
+export { ErrorText, MutedText, Row, Stack };

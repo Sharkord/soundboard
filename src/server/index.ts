@@ -17,6 +17,11 @@ import { getOggOpusDurationMs } from "../ogg";
 // its name up, and a raw character finds nothing and renders broken
 const PLAYER_REACTION_EMOJI = "loud_sound";
 
+const PLAY_COUNTS_SAVE_DELAY_MS = 10_000;
+
+// set by onLoad, for onUnload, which runs without its closure
+let flushPlayCounts: (() => Promise<void>) | undefined;
+
 /** The name to store, or throws why it is not one. */
 const validateName = (name: unknown): string => {
   const trimmed = typeof name === "string" ? name.trim() : "";
@@ -121,6 +126,8 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
   const indexPath = path.join(ctx.dataPath, "sounds.json");
   // its own file, so sounds.json kept its shape when categories came along
   const categoriesPath = path.join(ctx.dataPath, "categories.json");
+  // apart from sounds.json, so a play does not make every client refetch
+  const playCountsPath = path.join(ctx.dataPath, "play-counts.json");
 
   await fs.mkdir(soundsDir, { recursive: true });
 
@@ -130,7 +137,37 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
   const categories: TCategory[] = await Bun.file(categoriesPath)
     .json()
     .catch(() => []);
+  const playCounts: Record<string, number> = await Bun.file(playCountsPath)
+    .json()
+    .catch(() => ({}));
   const cooldownUntil = new Map<number, number>();
+  // one write at a time: two writes of the same file at once could leave it
+  // half one, half the other
+  let playCountsWrite = Promise.resolve();
+  let playCountsTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const writePlayCounts = () => {
+    clearTimeout(playCountsTimer);
+    playCountsTimer = undefined;
+    playCountsWrite = playCountsWrite
+      .then(() => Bun.write(playCountsPath, JSON.stringify(playCounts)))
+      .then(
+        () => {},
+        (error) => ctx.logger.error("Could not save play counts", error),
+      );
+
+    return playCountsWrite;
+  };
+
+  // a busy channel plays many sounds a second: they are written together,
+  // at most once per delay, not one whole file per play. A crash loses at
+  // most that many seconds of counts; an unload writes them first.
+  const savePlayCounts = () => {
+    playCountsTimer ??= setTimeout(writePlayCounts, PLAY_COUNTS_SAVE_DELAY_MS);
+  };
+
+  flushPlayCounts = () =>
+    playCountsTimer ? writePlayCounts() : playCountsWrite;
 
   // admins type these in, so a negative or empty one counts as 0
   const getLimit = (
@@ -234,8 +271,10 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
 
   const removeSound = async (sound: TSound) => {
     sounds.splice(sounds.indexOf(sound), 1);
+    delete playCounts[sound.id];
 
     await saveSounds();
+    savePlayCounts();
     await fs.rm(getSoundPath(sound), { force: true });
   };
 
@@ -361,6 +400,9 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
 
       cooldownUntil.set(invoker.userId, now + cooldownMs);
 
+      playCounts[soundId] = (playCounts[soundId] ?? 0) + 1;
+      savePlayCounts();
+
       const indicator = settings.get("playerIndicator");
       const showReaction = indicator === "reaction" || indicator === "both";
 
@@ -385,6 +427,13 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
 
       return { cooldownMs };
     },
+  });
+
+  ctx.actions.register({
+    name: "getPlayCounts",
+    description: "How many times each sound was played, by anyone.",
+    requires: Permission.MANAGE_PLUGINS,
+    executes: async () => playCounts,
   });
 
   ctx.actions.register({
@@ -468,4 +517,9 @@ const onLoad = async (ctx: PluginContext<TSharkord>) => {
   });
 };
 
-export { onLoad };
+const onUnload = async () => {
+  await flushPlayCounts?.();
+  flushPlayCounts = undefined;
+};
+
+export { onLoad, onUnload };

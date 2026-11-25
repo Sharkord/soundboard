@@ -15,15 +15,24 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@sharkord/ui";
-import { AudioLines, Heart, PictureInPicture2, Plus } from "lucide-react";
-import { memo, useEffect, useMemo, useState } from "react";
+import {
+  AudioLines,
+  ChevronDown,
+  ChevronRight,
+  Heart,
+  PictureInPicture2,
+  Plus,
+} from "lucide-react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { TSharkord, TSound } from "../contract";
 import { groupSounds } from "../groups";
 import {
+  formatDuration,
   useCanUpload,
   useErrorState,
   usePlaybackOptions,
   useSoundboard,
+  useStableCallback,
 } from "./store";
 import { ErrorText, MutedText, Row, Stack } from "./ui";
 import { playSound } from "./audio";
@@ -46,6 +55,12 @@ const GRID_GAP = 8;
 const POPOVER_WIDTH = 520;
 const POPOVER_GRID_MAX_HEIGHT = 440;
 const DETACHED_WINDOW_SIZE = { width: 560, height: 720 };
+const UPLOAD_DIALOG_MAX_WIDTH = "min(720px, calc(100% - 2rem))";
+// two rows of the grid
+const MAX_RECENT = GRID_COLUMNS * 2;
+// plays in a burst save the recent list once, not once per play
+const RECENT_SAVE_DELAY_MS = 2000;
+const NO_IDS: string[] = [];
 
 type TSoundCardProps = {
   sound: TSound;
@@ -56,6 +71,8 @@ type TSoundCardProps = {
   /** false in the detached window, where a popover would open in the main one */
   canEditHotkey: boolean;
   onPlay: (soundId: string) => void;
+  /** plays it for this user only, to hear it before the channel does */
+  onPreview: (soundId: string) => void;
   onToggleFavorite: (soundId: string) => void;
 };
 
@@ -67,6 +84,7 @@ const SoundCard = memo(
     showCooldown,
     canEditHotkey,
     onPlay,
+    onPreview,
     onToggleFavorite,
   }: TSoundCardProps) => {
     const isPlaying = useIsSoundPlaying(sound.id);
@@ -76,7 +94,7 @@ const SoundCard = memo(
         <Button
           // lit up while it plays in the channel, whoever played it
           variant={isPlaying ? "default" : "secondary"}
-          title={sound.name}
+          title={`${sound.name} · ${formatDuration(sound.durationMs)}\nShift-click or right-click to preview`}
           disabled={disabled}
           style={{
             width: "100%",
@@ -86,7 +104,13 @@ const SoundCard = memo(
             fontSize: 13,
             lineHeight: 1.2,
           }}
-          onClick={() => onPlay(sound.id)}
+          onClick={(event) =>
+            event.shiftKey ? onPreview(sound.id) : onPlay(sound.id)
+          }
+          onContextMenu={(event) => {
+            event.preventDefault();
+            onPreview(sound.id);
+          }}
         >
           <span
             style={{
@@ -126,19 +150,44 @@ const SoundCard = memo(
   },
 );
 
-const GroupHeading = ({ children }: { children: string }) => (
-  <span
-    style={{
-      fontSize: 11,
-      fontWeight: 600,
-      letterSpacing: "0.05em",
-      textTransform: "uppercase",
-      color: "var(--muted-foreground)",
-    }}
-  >
-    {children}
-  </span>
-);
+type TGroupHeadingProps = {
+  title: string;
+  isCollapsed: boolean;
+  onToggle: () => void;
+};
+
+const GroupHeading = ({ title, isCollapsed, onToggle }: TGroupHeadingProps) => {
+  const Chevron = isCollapsed ? ChevronRight : ChevronDown;
+
+  return (
+    <button
+      type="button"
+      title={isCollapsed ? "Show" : "Hide"}
+      onClick={onToggle}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 4,
+        padding: 0,
+        background: "none",
+        border: "none",
+        cursor: "pointer",
+        fontSize: 11,
+        fontWeight: 600,
+        letterSpacing: "0.05em",
+        textTransform: "uppercase",
+        color: "var(--muted-foreground)",
+      }}
+    >
+      <Chevron size={12} />
+      {title}
+    </button>
+  );
+};
+
+/** `list` with `id` added, or taken out if already in it. */
+const toggleId = (list: string[], id: string) =>
+  list.includes(id) ? list.filter((other) => other !== id) : [...list, id];
 
 type TSoundPickerProps = {
   /** caps the grid inside the popover; a detached window scrolls instead */
@@ -155,29 +204,57 @@ const SoundPicker = memo((props: TSoundPickerProps) => {
   const { sounds, categories } = useSoundboard();
   const cooldown = useCooldown();
   const { error, run } = useErrorState();
+  const playbackOptions = usePlaybackOptions();
   const [search, setSearch] = useState("");
 
-  const favorites = data.favorites ?? [];
+  // the shared empty list, not a new one per render, which would make every
+  // memo below that depends on it run again each time
+  const {
+    favorites = NO_IDS,
+    recent = NO_IDS,
+    collapsed = NO_IDS,
+  } = data;
+  const query = search.trim().toLowerCase();
+  const favoriteSet = useMemo(() => new Set(favorites), [favorites]);
 
-  const groups = useMemo(() => {
-    const query = search.trim().toLowerCase();
+  const groups = useMemo(
+    () =>
+      groupSounds(
+        sounds.filter((sound) => sound.name.toLowerCase().includes(query)),
+        categories,
+        favorites,
+        recent,
+      ),
+    [sounds, categories, favorites, recent, query],
+  );
 
-    return groupSounds(
-      sounds.filter((sound) => sound.name.toLowerCase().includes(query)),
-      categories,
-      favorites,
-    );
-  }, [sounds, categories, favorites, search]);
+  // a search shows every match, folded groups included
+  const isCollapsed = (groupId: string) =>
+    !query && collapsed.includes(groupId);
 
-  const onPlay = (soundId: string) => run(() => requestPlay(soundId));
+  // stable, so a search keystroke or a play renders the picker, not every
+  // one of its cards
+  const onPlay = useStableCallback((soundId: string) =>
+    run(() => requestPlay(soundId)),
+  );
 
-  const onToggleFavorite = (soundId: string) =>
-    save({
-      ...data,
-      favorites: favorites.includes(soundId)
-        ? favorites.filter((id) => id !== soundId)
-        : [...favorites, soundId],
-    });
+  const onPreview = useStableCallback((soundId: string) =>
+    run(() => playSound(soundId, playbackOptions)),
+  );
+
+  const onToggleFavorite = useStableCallback((soundId: string) =>
+    save({ ...data, favorites: toggleId(favorites, soundId) }),
+  );
+
+  const onToggleGroup = (groupId: string) =>
+    save({ ...data, collapsed: toggleId(collapsed, groupId) });
+
+  // the first card on screen: with a search, the best match
+  const playTopMatch = () => {
+    const top = groups.find((group) => !isCollapsed(group.id))?.sounds[0];
+
+    if (top && !cooldown.isActive) onPlay(top.id);
+  };
 
   return (
     <Stack
@@ -195,6 +272,11 @@ const SoundPicker = memo((props: TSoundPickerProps) => {
           placeholder="Search sounds"
           value={search}
           onChange={(event) => setSearch(event.target.value)}
+          onEnter={playTopMatch}
+          // in the popover, Escape also closes it, which clears it anyway
+          onKeyDown={(event) => {
+            if (event.key === "Escape") setSearch("");
+          }}
           autoFocus
         />
         {onAdd && (
@@ -224,8 +306,15 @@ const SoundPicker = memo((props: TSoundPickerProps) => {
         }}
       >
         {groups.map((group) => (
-          <Stack key={group.title ?? "all"} gap={6}>
-            {group.title && <GroupHeading>{group.title}</GroupHeading>}
+          <Stack key={group.id} gap={6}>
+            {group.title && (
+              <GroupHeading
+                title={group.title}
+                isCollapsed={isCollapsed(group.id)}
+                onToggle={() => onToggleGroup(group.id)}
+              />
+            )}
+            {!isCollapsed(group.id) && (
             <div
               style={{
                 display: "grid",
@@ -237,17 +326,19 @@ const SoundPicker = memo((props: TSoundPickerProps) => {
                 <SoundCard
                   key={sound.id}
                   sound={sound}
-                  isFavorite={favorites.includes(sound.id)}
+                  isFavorite={favoriteSet.has(sound.id)}
                   disabled={cooldown.isActive}
                   showCooldown={
                     cooldown.isActive && cooldown.soundId === sound.id
                   }
                   canEditHotkey={!isDetached}
                   onPlay={onPlay}
+                  onPreview={onPreview}
                   onToggleFavorite={onToggleFavorite}
                 />
               ))}
             </div>
+            )}
           </Stack>
         ))}
       </Stack>
@@ -275,11 +366,41 @@ const VoiceControls = memo(({ channelId }: { channelId: number }) => {
   const canUpload = useCanUpload();
   const playbackOptions = usePlaybackOptions();
   const deafened = useStoreSelector((state) => state.ownVoiceState.soundMuted);
+  const ownUserId = useStoreSelector((state) => state.ownUserId);
+  const { data, save } = useUserData<TSharkord>();
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   // lives outside the popover, which unmounts its content when it closes
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   // rendered here too, so leaving voice closes the window with the rest
   const [detachedWindow, setDetachedWindow] = useState<Window>();
+
+  // the recent list waiting to be saved, newest first
+  const pendingRecent = useRef<string[]>(undefined);
+  const recentTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  const flushRecent = useStableCallback(() => {
+    clearTimeout(recentTimer.current);
+
+    if (!pendingRecent.current) return;
+
+    save({ ...data, recent: pendingRecent.current }).catch(() => {});
+    pendingRecent.current = undefined;
+  });
+
+  const recordRecent = (soundId: string) => {
+    const recent = pendingRecent.current ?? data.recent ?? NO_IDS;
+
+    pendingRecent.current = [
+      soundId,
+      ...recent.filter((id) => id !== soundId),
+    ].slice(0, MAX_RECENT);
+
+    clearTimeout(recentTimer.current);
+    recentTimer.current = setTimeout(flushRecent, RECENT_SAVE_DELAY_MS);
+  };
+
+  // what is waiting is saved on leaving voice, not lost
+  useEffect(() => flushRecent, [flushRecent]);
 
   // mounted for as long as the user is in voice, so this hears every sound
   // played in their channel, whether the popover is open or not
@@ -296,6 +417,9 @@ const VoiceControls = memo(({ channelId }: { channelId: number }) => {
       },
       push.durationMs,
     );
+
+    // heard here, so popover, detached window and hotkeys all count
+    if (push.userId === ownUserId) recordRecent(push.soundId);
 
     if (deafened) return;
 
@@ -320,16 +444,17 @@ const VoiceControls = memo(({ channelId }: { channelId: number }) => {
     [channelId],
   );
 
-  const openUpload = () => {
+  // stable, so the picker is not rendered again with every play
+  const openUpload = useStableCallback(() => {
     setIsPickerOpen(false);
     setIsUploadOpen(true);
-  };
+  });
 
   useDetachedWindowLifecycle(detachedWindow, () =>
     setDetachedWindow(undefined),
   );
 
-  const detach = () => {
+  const detach = useStableCallback(() => {
     setDetachedWindow(
       openDetachedWindow(
         DETACHED_WINDOW_SIZE.width,
@@ -337,7 +462,7 @@ const VoiceControls = memo(({ channelId }: { channelId: number }) => {
       ),
     );
     setIsPickerOpen(false);
-  };
+  });
 
   return (
     <>
@@ -375,7 +500,11 @@ const VoiceControls = memo(({ channelId }: { channelId: number }) => {
       <SoundHotkeys sounds={sounds} />
 
       <Dialog open={isUploadOpen} onOpenChange={setIsUploadOpen}>
-        <DialogContent close={() => setIsUploadOpen(false)}>
+        <DialogContent
+          close={() => setIsUploadOpen(false)}
+          // room for the waveform and a batch's stepper; still fits a phone
+          style={{ maxWidth: UPLOAD_DIALOG_MAX_WIDTH }}
+        >
           <DialogHeader>
             <DialogTitle>Add a sound</DialogTitle>
           </DialogHeader>

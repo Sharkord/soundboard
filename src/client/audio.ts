@@ -11,6 +11,18 @@ let currentDeviceId: string | undefined;
 const getAudioContext = () =>
   (audioContext ??= new AudioContext({ sampleRate: SAMPLE_RATE }));
 
+// decoding needs no speakers: an offline context does it without opening the
+// audio device, so a file looked at but never played keeps it closed
+let decodingContext: OfflineAudioContext | undefined;
+
+/** Decodes an audio file to 48kHz, the rate everything here works at. */
+const decodeAudio = (data: ArrayBuffer) =>
+  (decodingContext ??= new OfflineAudioContext(
+    1,
+    1,
+    SAMPLE_RATE,
+  )).decodeAudioData(data);
+
 // missing from TypeScript's DOM types, and from some browsers
 type TRoutableAudioContext = AudioContext & {
   setSinkId?: (deviceId: string) => Promise<void>;
@@ -24,6 +36,22 @@ const setOutputDevice = async (deviceId = "") => {
 
   await context.setSinkId(deviceId).catch(() => {});
   currentDeviceId = deviceId;
+};
+
+// a running context keeps the audio device and its thread busy, silent or
+// not, so it is suspended once nothing has played for this long
+const IDLE_SUSPEND_MS = 10_000;
+
+let activeSources = 0;
+let suspendTimer: ReturnType<typeof setTimeout> | undefined;
+
+const scheduleSuspend = () => {
+  if (activeSources > 0) return;
+
+  clearTimeout(suspendTimer);
+  suspendTimer = setTimeout(() => {
+    if (activeSources === 0) void audioContext?.suspend();
+  }, IDLE_SUSPEND_MS);
 };
 
 type TPlayOptions = {
@@ -40,9 +68,17 @@ const playBuffer = async (
 ) => {
   const context = getAudioContext();
 
-  await setOutputDevice(deviceId);
-  // a context made outside a click starts suspended
-  await context.resume();
+  // before waiting on anything, so an idle suspend cannot land mid-start
+  clearTimeout(suspendTimer);
+
+  try {
+    await setOutputDevice(deviceId);
+    // a context made outside a click starts suspended, and an idle one is
+    await context.resume();
+  } catch (error) {
+    scheduleSuspend();
+    throw error;
+  }
 
   const gain = context.createGain();
   const source = context.createBufferSource();
@@ -51,34 +87,93 @@ const playBuffer = async (
   gain.connect(context.destination);
   source.buffer = buffer;
   source.connect(gain);
+
   source.start(
     0,
     startMs / 1000,
     endMs === undefined ? undefined : (endMs - startMs) / 1000,
   );
 
+  // counted once it really plays: a start that throws never ends
+  activeSources++;
+
+  // a listener, not onended, which callers set for themselves. Stopping
+  // fires it too.
+  source.addEventListener(
+    "ended",
+    () => {
+      source.disconnect();
+      gain.disconnect();
+      activeSources--;
+      scheduleSuspend();
+    },
+    { once: true },
+  );
+
   return source;
 };
 
-// fetched and decoded once per sound, since a sound never changes
+// decoded audio is raw samples, about 4MB for 10 stereo seconds, so only
+// the sounds played most recently are kept. The rest are decoded again from
+// the file, which the browser caches for good (the server marks it immutable).
+const MAX_CACHED_BYTES = 48 * 1024 * 1024;
+
+// in least to most recently played order: a Map iterates in insertion order
 const soundBuffers = new Map<string, Promise<AudioBuffer>>();
+const bufferBytes = new Map<string, number>();
+let cachedBytes = 0;
+
+const forgetSoundBuffer = (soundId: string) => {
+  cachedBytes -= bufferBytes.get(soundId) ?? 0;
+  bufferBytes.delete(soundId);
+  soundBuffers.delete(soundId);
+};
+
+const evictLeastRecent = () => {
+  for (const soundId of soundBuffers.keys()) {
+    if (cachedBytes <= MAX_CACHED_BYTES) return;
+
+    // still loading, so not counted yet
+    if (bufferBytes.has(soundId)) forgetSoundBuffer(soundId);
+  }
+};
 
 const getSoundBuffer = (soundId: string): Promise<AudioBuffer> => {
-  let buffer = soundBuffers.get(soundId);
+  const cached = soundBuffers.get(soundId);
 
-  if (!buffer) {
-    buffer = actions
-      .fetchPluginRoute(PLUGIN_ID, `/sounds/${soundId}`)
-      .then(async (res) => {
-        if (!res.ok) throw new Error("Could not load the sound.");
+  if (cached) {
+    // to the back of the line: played now, so evicted last
+    soundBuffers.delete(soundId);
+    soundBuffers.set(soundId, cached);
 
-        return getAudioContext().decodeAudioData(await res.arrayBuffer());
-      });
-
-    // a failed fetch is retried on the next play instead of cached
-    buffer.catch(() => soundBuffers.delete(soundId));
-    soundBuffers.set(soundId, buffer);
+    return cached;
   }
+
+  const buffer = actions
+    .fetchPluginRoute(PLUGIN_ID, `/sounds/${soundId}`)
+    .then(async (res) => {
+      if (!res.ok) throw new Error("Could not load the sound.");
+
+      return decodeAudio(await res.arrayBuffer());
+    });
+
+  soundBuffers.set(soundId, buffer);
+  buffer.then(
+    (decoded) => {
+      // evicted or replaced while it loaded
+      if (soundBuffers.get(soundId) !== buffer) return;
+
+      const bytes = decoded.length * decoded.numberOfChannels * 4;
+
+      bufferBytes.set(soundId, bytes);
+      cachedBytes += bytes;
+      evictLeastRecent();
+    },
+    // a failed fetch is retried on the next play instead of cached
+    () => {
+      if (soundBuffers.get(soundId) === buffer) forgetSoundBuffer(soundId);
+    },
+  );
 
   return buffer;
 };
@@ -90,7 +185,11 @@ const OPUS_BITRATES = [64000, 96000];
  * Encodes a 48kHz clip, one array per channel (mono or stereo), into the Ogg
  * Opus file the server stores.
  */
-const encodeOpus = async (channels: Float32Array[]): Promise<Blob> => {
+const encodeOpus = async (
+  channels: Float32Array[],
+  /** applied in the copy the encoder needs anyway, never to `channels` */
+  gain = 1,
+): Promise<Blob> => {
   if (typeof AudioEncoder === "undefined") {
     throw new Error("This browser cannot encode audio. Try a recent one.");
   }
@@ -120,6 +219,10 @@ const encodeOpus = async (channels: Float32Array[]): Promise<Blob> => {
 
   channels.forEach((samples, i) => planes.set(samples, i * frameCount));
 
+  if (gain !== 1) {
+    for (let i = 0; i < planes.length; i++) planes[i]! *= gain;
+  }
+
   encoder.encode(
     new AudioData({
       format: "f32-planar",
@@ -143,4 +246,4 @@ const encodeOpus = async (channels: Float32Array[]): Promise<Blob> => {
 const playSound = async (soundId: string, options?: TPlayOptions) =>
   playBuffer(await getSoundBuffer(soundId), options);
 
-export { encodeOpus, getAudioContext, playBuffer, playSound };
+export { decodeAudio, encodeOpus, getAudioContext, playBuffer, playSound };

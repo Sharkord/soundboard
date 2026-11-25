@@ -36,6 +36,20 @@ test("favorites, then categories by name, then the rest", () => {
   ]);
 });
 
+test("recent plays, newest first, without leaving their group", () => {
+  const sounds = [sound("a"), sound("b", "m"), sound("c", "m")];
+
+  expect(
+    titlesAndIds(
+      groupSounds(sounds, [{ id: "m", name: "Memes" }], [], ["c", "gone", "a"]),
+    ),
+  ).toEqual([
+    ["Recent", ["c", "a"]],
+    ["Memes", ["b", "c"]],
+    ["Other", ["a"]],
+  ]);
+});
+
 test("a single group gets no heading, and nothing gives no groups", () => {
   expect(titlesAndIds(groupSounds([sound("b"), sound("a")], [], []))).toEqual([
     [undefined, ["a", "b"]],

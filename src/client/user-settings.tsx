@@ -1,9 +1,10 @@
+import { SettingsSection } from "@sharkord/ui";
 import { useStoreSelector } from "@sharkord/plugin-sdk/client";
 import { memo, useCallback, useMemo } from "react";
 import type { TSoundChanges } from "../contract";
 import { SoundList } from "./sound-list";
 import { callAction, useCanUpload, useSoundboard } from "./store";
-import { Section, Stack } from "./ui";
+import { Stack } from "./ui";
 import { UploadForm } from "./upload-form";
 import { VolumeControl } from "./volume-control";
 
@@ -30,17 +31,17 @@ const UserSettings = memo(() => {
 
   return (
     <Stack gap={24} style={{ padding: 16 }}>
-      <Section title="Volume">
+      <SettingsSection title="Volume">
         <VolumeControl />
-      </Section>
+      </SettingsSection>
 
       {canUpload && (
-        <Section title="Upload a sound">
+        <SettingsSection title="Upload a sound">
           <UploadForm />
-        </Section>
+        </SettingsSection>
       )}
 
-      <Section title="Your sounds">
+      <SettingsSection title="Your sounds">
         <SoundList
           sounds={ownSounds}
           showUploader={false}
@@ -50,7 +51,7 @@ const UserSettings = memo(() => {
           categories={categories}
           emptyText="You have not uploaded any sounds."
         />
-      </Section>
+      </SettingsSection>
     </Stack>
   );
 });
